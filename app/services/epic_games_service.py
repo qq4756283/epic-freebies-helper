@@ -1625,6 +1625,21 @@ class EpicGames:
                 )
                 continue
 
+            region_unavailable_markers = [
+                "CURRENTLY UNAVAILABLE IN YOUR PLATFORM OR REGION",
+                "CONTENT IS CURRENTLY UNAVAILABLE",
+            ]
+            if not btn_text and not container_text:
+                with suppress(Exception):
+                    body_text = (await page.locator("body").text_content(timeout=2000) or "").upper()
+                    if any(marker in body_text for marker in region_unavailable_markers):
+                        logger.success(
+                            "Game not available in current region - "
+                            f"title='{game_title}' url='{url}'"
+                        )
+                        await self._capture_purchase_debug(page, "region_unavailable", url)
+                        continue
+
             # 5. 白名单检查 (Add to Cart 特殊处理)
             # 如果包含 'CART'，说明是加入购物车流程
             if "CART" in btn_text_upper:
