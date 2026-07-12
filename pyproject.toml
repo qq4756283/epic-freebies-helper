@@ -6,6 +6,7 @@ dependencies = [
     "pydantic-settings>=2.8.1",
     "celery[redis]>=5.4.0",
     "hcaptcha-challenger[camoufox]>=0.18.13",
+    "browserforge>=1.2.4",
 ]
 requires-python = ">=3.12,<=3.13"
 authors = [

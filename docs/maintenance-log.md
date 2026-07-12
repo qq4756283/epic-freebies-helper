@@ -251,6 +251,23 @@
   - 将“为什么默认按周跑”“如何自己改 cron”写入中英文 GitHub Actions 文档。
   - 在中英文 README 的功能概览中同步说明默认是每周四运行一次，并支持自行调整。
 
+### Checkout 安全校验解完后仍停在 Add to library，最终被误判失败
+
+- 现象：
+  - 某些免费游戏在 checkout 中完成一轮或多轮 hCaptcha 后，并不会立刻跳到“Thanks for your order / In Library”这类明确成功态。
+  - 页面可能仍停留在商品页上的 checkout 弹层，继续显示 `Add to library`，最后主流程以 `Instant checkout ended without a confirmed claim state` 收尾，并在最终 reconciliation 后抛出失败。
+- 根因判断：
+  - 旧的最终确认逻辑对这类“checkout 还活着，但尚未被动变成 claimed state”的情况过于保守。
+  - `final reconciliation` 主要做页面状态检查和订单历史检查，没有在发现 checkout/security 仍然存在时主动把领取流程接着跑完。
+  - 同时 reconciliation 首轮不强制重开商品页，容易继续沿用已经过期的 checkout 弹层 DOM。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - `final reconciliation` 现在每轮都会重开商品页，并在发现 `checkout` 或 `security` 仍然活跃时，主动恢复即时结账流程，而不是只做被动确认。
+  - `_handle_instant_checkout()` 增加内部恢复模式，允许 reconciliation 复用即时结账逻辑，但避免递归触发自己的 finalize 分支。
+  - 将 unconfirmed checkout 的最终确认次数和等待窗口拉长，提升 Epic 后端状态回写较慢时的恢复能力。
+
 ### Device not supported 弹窗再次导致领取失败
 
 - 现象：
@@ -715,3 +732,39 @@
   - 如果 8 秒内仍拿不到导航登录态，会访问 Epic 账号订单接口 `ajaxGetOrderHistory` 做后备会话探针。
   - 只有后备接口返回合法 JSON 且包含 `orders` 列表时才视为已登录；未登录、重定向、页面错误或非 JSON 响应仍会继续失败，不会把匿名页面误判成有效会话。
   - 领取前订单同步复用同一订单接口解析逻辑，并保留已有 `Device not supported`、`ADD TO LIBRARY`、结账 hCaptcha 和订单历史最终确认逻辑。
+
+### 2026-07-06 收紧即时结账确认链并修复多游戏连续领取的第二单易失败问题
+
+- 现象：
+  - 有些账号实际已经把周免领进库里，GitHub Actions 最终却仍以 `Failed to confirm claim flow for promotions` 退出。
+  - 另一类高频反馈是：同一轮两个周免里，第一个能成功，第二个更容易卡在 checkout 安全校验、`Place Order` / `Add to library` 后无收口，最终误报失败。
+- 根因判断：
+  - 旧的即时结账收尾只做了偏短的一次性确认，遇到 Epic 商品页状态回写或订单历史同步稍慢时，容易把“已完成但未及时显现”的 case 判成失败。
+  - `Place Order` / `Add to library` 的提交逻辑在第一次 click 调用不抛异常时就直接返回，即使按钮、overlay 和页面状态完全没变化，也不会继续尝试后续提交策略。
+  - 连续领取多个游戏时，第二个商品更容易遇到更重的 checkout 风控；同时旧逻辑固定偏向首个 purchase iframe，遇到遗留或非活动 iframe 时更容易点到错误容器。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - checkout 容器扫描改为优先遍历当前页面上更像活动 checkout 的 frame / page 容器，不再固定依赖首个 purchase iframe。
+  - `Place Order` / `Add to library` 提交改为只有在按钮消失、进入 claimed、安全校验出现或按钮/overlay 状态发生变化时才算本次 click 真正生效；否则继续尝试后续提交策略。
+  - 即时结账末尾增加 promotion 级 reconciliation：可回到商品页重新确认，并额外轮询订单历史，降低“实际已领到但最后没收好”的误报率。
+  - `collect_weekly_games()` 会在真正抛错前，再对所有未确认 promotion 统一执行一轮最终 reconciliation，尽量把第二单的延迟成功补收回来。
+  - 本地验证限制：未执行测试；已执行 `python3 -m py_compile app/services/epic_games_service.py` 与 `git diff --check` 做静态校验。
+
+### 2026-07-10 更新 BrowserForge 运行时数据依赖
+
+- 现象：
+  - 部分 fork 的 GitHub Actions 在进入 Epic 登录前就失败。
+  - 日志显示 `camoufox` 导入 `browserforge` 时尝试读取 `browserforge/headers/data/headers-order.json`，但当前锁定的 `browserforge 1.2.3` wheel 中没有该运行时数据文件。
+- 根因判断：
+  - `uv.lock` 仍锁定 `browserforge 1.2.3`。
+  - `browserforge 1.2.4` 已将模型 / 指纹数据改为通过 `apify-fingerprint-datapoints` 依赖提供，不再依赖旧的包内 `headers-order.json` 路径。
+- 改动文件：
+  - `pyproject.toml`
+  - `uv.lock`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 在项目依赖中显式增加 `browserforge>=1.2.4`，避免后续重新锁定到缺少运行时数据文件的版本。
+  - 刷新 `uv.lock`，将 `browserforge` 从 `1.2.3` 更新到 `1.2.4`，并锁定新增的 `apify-fingerprint-datapoints` 传递依赖。
+  - 本地验证：`from browserforge.headers import HeaderGenerator`、`from browserforge.fingerprints import FingerprintGenerator`、`from camoufox import AsyncCamoufox` 均可正常导入。
