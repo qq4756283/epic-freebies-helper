@@ -40,7 +40,7 @@ URL_ORDER_HISTORY = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHi
 PURCHASE_IFRAME_SELECTOR = (
     "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]"
 )
-CHECKOUT_BUTTON_TEXTS = ("PLACE ORDER", "ADD TO LIBRARY")
+CHECKOUT_BUTTON_TEXTS = ("PLACE ORDER", "ADD TO LIBRARY", "GET", "GET FREE", "GET NOW", "DOWNLOAD")
 PurchaseContainer = FrameLocator | Frame | Page
 
 
@@ -766,6 +766,10 @@ class EpicGames:
             ("ADD IT TO YOUR LIBRARY", "ADD TO LIBRARY"),
             ("REVIEW AND PLACE ORDER", "ORDER SUMMARY"),
             ("VERIFY YOUR INFORMATION", "ORDER SUMMARY"),
+            ("GET", "ADD TO LIBRARY"),
+            ("GET FREE", "ADD TO LIBRARY"),
+            ("PLACE ORDER", "FREE"),
+            ("ORDER SUMMARY", "FREE"),
         )
         return any(all(marker in normalized for marker in markers) for markers in checkout_markers)
 
@@ -998,6 +1002,14 @@ class EpicGames:
                         frame_url,
                     )
                     return container, confirm_btn
+                except AssertionError:
+                    pass
+
+                try:
+                    purchase_cta = container.locator("button[data-testid='purchase-cta-button']")
+                    await expect(purchase_cta).to_be_visible(timeout=confirm_timeout)
+                    logger.debug("✅ Found purchase-cta-button by data-testid in container url='{}'", frame_url)
+                    return container, purchase_cta
                 except AssertionError:
                     pass
 
@@ -1506,8 +1518,13 @@ class EpicGames:
             if state == "security":
                 if not await self._resolve_checkout_security_check(page, agent, url):
                     return False
-                state = "checkout"
-                payload = None
+                state, payload = await self._wait_for_purchase_state(page, url, timeout_ms=25000)
+                if state == "claimed":
+                    logger.success(f"Instant checkout confirmed claim state after security check - {url=}")
+                    return True
+                if state != "checkout" or payload is None:
+                    state = "checkout"
+                    payload = None
 
             if state != "checkout" or payload is None:
                 logger.warning(f"Instant checkout never reached a checkout container - {url=}")
