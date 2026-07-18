@@ -13,14 +13,74 @@ env:
 jobs:
   epic-gamer:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    
+    # Leave headroom beyond captcha budgets so runs fail with app errors, not pure cancellation.
+    timeout-minutes: 45
+
     # 默认不在主仓库自身执行定时任务；Fork 后的仓库会正常运行。
     if: github.repository != 'Ronchy2000/epic-freebies-helper'
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Precheck required secrets
+        env:
+          EPIC_EMAIL: ${{ secrets.EPIC_EMAIL }}
+          EPIC_PASSWORD: ${{ secrets.EPIC_PASSWORD }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          if [ -z "${EPIC_EMAIL:-}" ]; then missing+=("EPIC_EMAIL"); fi
+          if [ -z "${EPIC_PASSWORD:-}" ]; then missing+=("EPIC_PASSWORD"); fi
+
+          provider="$(printf '%s' "${LLM_PROVIDER:-}" | tr '[:upper:]' '[:lower:]' | xargs || true)"
+          if [ -z "$provider" ]; then
+            if [ -n "${GLM_API_KEY:-}" ]; then
+              provider="glm"
+            elif [ -n "${GEMINI_API_KEY:-}" ]; then
+              provider="gemini"
+            else
+              provider=""
+            fi
+          fi
+
+          if [ -z "$provider" ]; then
+            missing+=("LLM_PROVIDER_or_API_KEY")
+          elif [ "$provider" = "glm" ] && [ -z "${GLM_API_KEY:-}" ]; then
+            missing+=("GLM_API_KEY (required when LLM_PROVIDER=glm)")
+          elif [ "$provider" = "gemini" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+            missing+=("GEMINI_API_KEY (required when LLM_PROVIDER=gemini)")
+          elif [ "$provider" != "glm" ] && [ "$provider" != "gemini" ]; then
+            missing+=("LLM_PROVIDER must be glm or gemini (got: ${provider})")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            {
+              echo "## Secrets precheck failed"
+              echo
+              echo "Missing or invalid configuration:"
+              for item in "${missing[@]}"; do
+                echo "- \`$item\`"
+              done
+              echo
+              echo "Recommended GLM setup:"
+              echo "- \`LLM_PROVIDER=glm\`"
+              echo "- \`GLM_API_KEY=<key>\`"
+              echo "- \`GLM_MODEL=glm-4.6v\` (optional but recommended)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Secrets precheck failed: ${missing[*]}"
+            exit 1
+          fi
+
+          {
+            echo "## Secrets precheck"
+            echo
+            echo "- Status: passed"
+            echo "- Resolved provider: \`$provider\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -49,6 +109,32 @@ jobs:
       - name: Install Playwright Firefox fallback
         run: uv run playwright install firefox
 
+      - name: Write runtime config summary
+        env:
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          GLM_MODEL: ${{ secrets.GLM_MODEL }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          CHALLENGE_CLASSIFIER_MODEL: ${{ secrets.CHALLENGE_CLASSIFIER_MODEL }}
+          IMAGE_CLASSIFIER_MODEL: ${{ secrets.IMAGE_CLASSIFIER_MODEL }}
+          SPATIAL_POINT_REASONER_MODEL: ${{ secrets.SPATIAL_POINT_REASONER_MODEL }}
+          SPATIAL_PATH_REASONER_MODEL: ${{ secrets.SPATIAL_PATH_REASONER_MODEL }}
+          BROWSER_BACKEND: auto
+        run: |
+          provider="$(printf '%s' "${LLM_PROVIDER:-}" | tr '[:upper:]' '[:lower:]' | xargs || true)"
+          {
+            echo "## Runtime config"
+            echo
+            echo "- Job timeout: \`45m\`"
+            echo "- LLM_PROVIDER: \`${provider:-auto}\`"
+            echo "- GLM_MODEL: \`${GLM_MODEL:-default}\`"
+            echo "- GEMINI_MODEL: \`${GEMINI_MODEL:-default}\`"
+            echo "- CHALLENGE_CLASSIFIER_MODEL: \`${CHALLENGE_CLASSIFIER_MODEL:-fallback}\`"
+            echo "- IMAGE_CLASSIFIER_MODEL: \`${IMAGE_CLASSIFIER_MODEL:-fallback}\`"
+            echo "- SPATIAL_POINT_REASONER_MODEL: \`${SPATIAL_POINT_REASONER_MODEL:-fallback}\`"
+            echo "- SPATIAL_PATH_REASONER_MODEL: \`${SPATIAL_PATH_REASONER_MODEL:-fallback}\`"
+            echo "- BROWSER_BACKEND: \`${BROWSER_BACKEND}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run Epic Awesome Gamer
         env:
           EPIC_EMAIL: ${{ secrets.EPIC_EMAIL }}
@@ -71,6 +157,11 @@ jobs:
           MPLBACKEND: Agg
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: app
+          # Captcha fail-fast budgets (seconds / attempts)
+          LOGIN_CAPTCHA_MAX_ATTEMPTS: "3"
+          LOGIN_CAPTCHA_MAX_SECONDS: "600"
+          CHECKOUT_CAPTCHA_MAX_ATTEMPTS: "8"
+          CHECKOUT_CAPTCHA_MAX_WAIT_MS: "720000"
         run: |
           echo "🚀 启动定时领取任务（支持 Gemini/AiHubMix/GLM）..."
           xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run app/deploy.py
@@ -87,6 +178,31 @@ jobs:
             echo "- If the game was already in your library, Epic may not send a separate confirmation email. Review the logs and artifacts when verification is needed."
             echo "- If you later report an issue from a private fork, upload the artifact zip files because maintainers cannot access private Actions pages."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write failure diagnostics
+        if: failure() || cancelled()
+        run: |
+          {
+            echo "## Run did not succeed"
+            echo
+            echo "- Conclusion may be \`failure\` or \`cancelled\`."
+            echo "- Prefer app-level captcha budget errors over pure job timeout."
+            echo "- Check artifacts: \`epic-logs-*\`, \`epic-screenshots-*\`."
+            echo
+            echo "### Common captcha log markers"
+            echo "- \`ValidationError\` / \`ImageDragDropChallenge\`"
+            echo "- \`JSONDecodeError\` / empty \`checkcaptcha\` response"
+            echo "- \`Wait for captcha response timeout\`"
+            echo "- \`captcha_budget_exceeded\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -d app/volumes/logs ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "### Recent log markers" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            grep -RniE "ValidationError|ImageDragDropChallenge|JSONDecodeError|Wait for captcha|captcha_budget_exceeded|Authentication failed|Invalid LLM configuration|The operation was canceled" app/volumes/logs 2>/dev/null | tail -n 40 >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload runtime artifacts
         if: always()
