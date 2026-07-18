@@ -58,7 +58,7 @@ class EpicSettings(AgentConfig):
         default="https://open.bigmodel.cn/api/paas/v4", description="GLM OpenAI-compatible base URL"
     )
 
-    GLM_MODEL: str = Field(default="glm-4.5v", description="GLM vision-capable default model")
+    GLM_MODEL: str = Field(default="glm-4.6v", description="GLM vision-capable default model")
 
     BROWSER_BACKEND: str = Field(
         default="auto", description="Supported values: auto, camoufox, playwright"
@@ -77,6 +77,12 @@ class EpicSettings(AgentConfig):
     cache_dir: Path = HCAPTCHA_DIR.joinpath(".cache")
     challenge_dir: Path = HCAPTCHA_DIR.joinpath(".challenge")
     captcha_response_dir: Path = HCAPTCHA_DIR.joinpath(".captcha")
+
+    # Captcha fail-fast budgets (override via env in CI)
+    LOGIN_CAPTCHA_MAX_ATTEMPTS: int = Field(default=3)
+    LOGIN_CAPTCHA_MAX_SECONDS: int = Field(default=600)
+    CHECKOUT_CAPTCHA_MAX_ATTEMPTS: int = Field(default=8)
+    CHECKOUT_CAPTCHA_MAX_WAIT_MS: int = Field(default=720000)
 
     ENABLE_APSCHEDULER: bool = Field(default=True)
     TASK_TIMEOUT_SECONDS: int = Field(default=900)
@@ -157,6 +163,28 @@ class EpicSettings(AgentConfig):
         target_ = USER_DATA_DIR.joinpath(f"{self.EPIC_EMAIL}{suffix}")
         target_.mkdir(parents=True, exist_ok=True)
         return target_
+
+
+    @staticmethod
+    def classify_captcha_error(err: BaseException | str) -> str:
+        text = str(err)
+        lowered = text.lower()
+        if (
+            "validationerror" in lowered
+            or "imagedragdropchallenge" in lowered
+            or "field required" in lowered
+        ):
+            return "captcha_schema_error"
+        if "jsondecodeerror" in lowered or "expecting value" in lowered:
+            return "captcha_empty_response"
+        if (
+            "wait for captcha response timeout" in lowered
+            or "wait for captcha payload" in lowered
+        ):
+            return "captcha_timeout"
+        if "timeout" in lowered:
+            return "captcha_timeout"
+        return "captcha_unknown_error"
 
     @property
     def llm_configuration_error(self) -> str | None:

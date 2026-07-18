@@ -1157,17 +1157,23 @@ class EpicGames:
         )
 
     async def _resolve_checkout_security_check(
-        self, page: Page, agent: AgentV, url: str, max_wait_ms: int = 600000
+        self, page: Page, agent: AgentV, url: str, max_wait_ms: int | None = None
     ) -> bool:
         if not await self._is_checkout_security_check_visible(page):
             return True
+
+        if max_wait_ms is None:
+            max_wait_ms = int(settings.CHECKOUT_CAPTCHA_MAX_WAIT_MS)
+        max_attempts = max(1, int(settings.CHECKOUT_CAPTCHA_MAX_ATTEMPTS))
 
         logger.warning(f"Checkout security check detected - starting solve loop. {url=}")
 
         started_at = time.monotonic()
         attempt = 0
+        consecutive_failures = 0
+        last_error_kind = "captcha_unknown_error"
 
-        while (time.monotonic() - started_at) * 1000 < max_wait_ms:
+        while (time.monotonic() - started_at) * 1000 < max_wait_ms and attempt < max_attempts:
             attempt += 1
 
             if await self._is_claimed_state(page, url):
@@ -1194,14 +1200,31 @@ class EpicGames:
 
             try:
                 await agent.wait_for_challenge()
+                consecutive_failures = 0
             except Exception as err:
+                consecutive_failures += 1
+                last_error_kind = settings.classify_captcha_error(err)
                 logger.warning(
-                    f"Checkout security check solve attempt failed (attempt {attempt}): {err}"
+                    f"Checkout security check solve attempt failed (attempt {attempt}): {err} | kind={last_error_kind}"
                 )
                 if attempt <= 3 or attempt % 2 == 0:
                     await self._capture_purchase_debug(
                         page, f"checkout_security_check_failed_{attempt}", url
                     )
+                # Hard-fail early when the solver is repeatedly producing unusable answers.
+                if consecutive_failures >= 4 and last_error_kind in {
+                    "captcha_schema_error",
+                    "captcha_empty_response",
+                }:
+                    logger.error(
+                        "captcha_budget_exceeded:checkout "
+                        f"kind={last_error_kind} attempts={attempt} "
+                        f"consecutive_failures={consecutive_failures} | {url=}"
+                    )
+                    await self._capture_purchase_debug(
+                        page, "checkout_security_check_budget_exceeded", url
+                    )
+                    return False
 
             await page.wait_for_timeout(1500)
 
@@ -1226,7 +1249,12 @@ class EpicGames:
                 logger.success(f"Checkout security check cleared back to checkout - {url=}")
                 return True
 
-        logger.warning(f"Checkout security check remained visible after timeout - {url=}")
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.warning(
+            "Checkout security check remained visible after budget - "
+            f"attempts={attempt}/{max_attempts} elapsed_ms={elapsed_ms}/{max_wait_ms} "
+            f"kind={last_error_kind} | {url=}"
+        )
         await self._capture_purchase_debug(page, "checkout_security_check_unresolved", url)
         return False
 

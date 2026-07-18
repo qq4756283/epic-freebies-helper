@@ -33,6 +33,10 @@ class EpicManualActionRequiredError(RuntimeError):
     pass
 
 
+class EpicCaptchaBudgetExceededError(RuntimeError):
+    pass
+
+
 class EpicAuthorization:
 
     def __init__(self, page: Page):
@@ -500,26 +504,64 @@ class EpicAuthorization:
             await self.page.click("#sign-in")
 
             login_confirmed = False
-            for challenge_attempt in range(1, 4):
-                logger.debug("Solving login challenge attempt {}/3", challenge_attempt)
-                with suppress(Exception):
+            max_attempts = max(1, int(settings.LOGIN_CAPTCHA_MAX_ATTEMPTS))
+            max_seconds = max(30, int(settings.LOGIN_CAPTCHA_MAX_SECONDS))
+            challenge_started = time.monotonic()
+            last_error_kind = "captcha_unknown_error"
+            last_error: Exception | None = None
+
+            for challenge_attempt in range(1, max_attempts + 1):
+                elapsed = int(time.monotonic() - challenge_started)
+                if elapsed >= max_seconds:
+                    raise EpicCaptchaBudgetExceededError(
+                        "captcha_budget_exceeded:login "
+                        f"kind={last_error_kind} attempts={challenge_attempt - 1} "
+                        f"elapsed={elapsed}s budget={max_seconds}s"
+                    )
+
+                logger.debug(
+                    "Solving login challenge attempt {}/{} (elapsed {}s)",
+                    challenge_attempt,
+                    max_attempts,
+                    elapsed,
+                )
+                try:
                     await agent.wait_for_challenge()
+                except Exception as err:
+                    last_error = err
+                    last_error_kind = settings.classify_captcha_error(err)
+                    logger.warning(
+                        "Login captcha solve failed (attempt {}/{}): {} | kind={}",
+                        challenge_attempt,
+                        max_attempts,
+                        err,
+                        last_error_kind,
+                    )
 
                 try:
                     await self._await_login_outcome(point_url, timeout_seconds=25)
                     login_confirmed = True
                     break
-                except PlaywrightTimeoutError:
+                except PlaywrightTimeoutError as err:
                     if not await self._has_visible_hcaptcha():
                         raise
+                    last_error = err
+                    last_error_kind = settings.classify_captcha_error(err)
                     logger.warning(
                         "Login outcome timed out while captcha is still visible; retrying solve "
-                        "attempt {}/3",
+                        "attempt {}/{}",
                         challenge_attempt,
+                        max_attempts,
                     )
 
             if not login_confirmed:
-                await self._await_login_outcome(point_url, timeout_seconds=10)
+                elapsed = int(time.monotonic() - challenge_started)
+                detail = f"kind={last_error_kind} attempts={max_attempts} elapsed={elapsed}s"
+                if last_error is not None:
+                    detail = f"{detail} last_error={last_error!r}"
+                raise EpicCaptchaBudgetExceededError(
+                    f"captcha_budget_exceeded:login {detail}"
+                )
             logger.success("Login success")
 
             if self._needs_mfa_setup_prompt() and not await self._dismiss_mfa_setup_prompt(
@@ -547,6 +589,9 @@ class EpicAuthorization:
             if isinstance(err, EpicManualActionRequiredError):
                 logger.error(str(err))
                 raise
+            if isinstance(err, EpicCaptchaBudgetExceededError):
+                logger.error(str(err))
+                raise
             return None
 
     async def invoke(self) -> bool:
@@ -570,6 +615,8 @@ class EpicAuthorization:
                 if await self._login():
                     return True
             except EpicManualActionRequiredError:
+                raise
+            except EpicCaptchaBudgetExceededError:
                 raise
             except EpicAuthenticationFatalError:
                 logger.error("Authentication aborted because Epic 2FA is still enabled")
