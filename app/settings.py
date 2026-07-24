@@ -80,12 +80,18 @@ class EpicSettings(AgentConfig):
 
     # Captcha fail-fast budgets (override via env in CI)
     LOGIN_CAPTCHA_MAX_ATTEMPTS: int = Field(default=3)
-    LOGIN_CAPTCHA_MAX_SECONDS: int = Field(default=600)
-    CHECKOUT_CAPTCHA_MAX_ATTEMPTS: int = Field(default=8)
-    CHECKOUT_CAPTCHA_MAX_WAIT_MS: int = Field(default=720000)
+    LOGIN_CAPTCHA_MAX_SECONDS: int = Field(default=300)
+    CHECKOUT_CAPTCHA_MAX_ATTEMPTS: int = Field(default=4)
+    CHECKOUT_CAPTCHA_MAX_WAIT_MS: int = Field(default=240000)
 
+    # Task / per-game budgets to avoid Actions hard cancel
     ENABLE_APSCHEDULER: bool = Field(default=True)
-    TASK_TIMEOUT_SECONDS: int = Field(default=900)
+    TASK_TIMEOUT_SECONDS: int = Field(default=1500)
+    PER_GAME_TIMEOUT_SECONDS: int = Field(default=300)
+    PER_GAME_MAX_CHECKOUT_ATTEMPTS: int = Field(default=2)
+    CHECKOUT_SCAN_TIMEOUT_MS: int = Field(default=3000)
+    FINALIZE_TIMEOUT_SECONDS: int = Field(default=90)
+    CART_CHECKOUT_MAX_ATTEMPTS: int = Field(default=2)
     REDIS_URL: str = Field(default="redis://redis:6379/0")
     CELERY_WORKER_CONCURRENCY: int = Field(default=1)
     CELERY_TASK_TIME_LIMIT: int = Field(default=1200)

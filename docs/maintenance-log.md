@@ -768,3 +768,27 @@
   - 在项目依赖中显式增加 `browserforge>=1.2.4`，避免后续重新锁定到缺少运行时数据文件的版本。
   - 刷新 `uv.lock`，将 `browserforge` 从 `1.2.3` 更新到 `1.2.4`，并锁定新增的 `apify-fingerprint-datapoints` 传递依赖。
   - 本地验证：`from browserforge.headers import HeaderGenerator`、`from browserforge.fingerprints import FingerprintGenerator`、`from camoufox import AsyncCamoufox` 均可正常导入。
+
+### 2026-07-24 Actions 45m 超时取消的完整熔断修复
+
+- 现象：
+  - GitHub Actions run `30026627269` 在 `Run Epic Awesome Gamer` 跑满 45 分钟后被硬取消。
+  - 日志显示 `Foretales` 结账阶段出现 hCaptcha challenge timeout，随后误判 security check solved，再进入长时间 `Primary buttons not found` / `Checkout container never became ready` 循环。
+  - 单游戏卡死拖垮整个 job，失败形态是 `cancelled` 而非应用层错误。
+- 根因判断：
+  - `_wait_for_checkout_ready` / `_wait_for_purchase_state` / `_observe_checkout_outcome` 使用 sleep 累加 elapsed，未按墙钟计时；`_active_purchase_container` 扫描可把短超时拖成数十秒。
+  - `CHECKOUT_CAPTCHA_MAX_WAIT_MS=720000` 与无单游戏预算叠加，导致 45 分钟被耗尽。
+  - 安全验证在 challenge 失败后仅凭 UI 不可见即记为 solved，存在假阳性。
+  - `_purchase_free_game` 验证码失败无限递归；`TASK_TIMEOUT_SECONDS` 已定义但未接入 `deploy.py`。
+- 改动文件：
+  - `app/settings.py`
+  - `app/deploy.py`
+  - `app/services/epic_games_service.py`
+  - `.github/workflows/epic-gamer.yml`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增/生效任务级与单游戏级墙钟预算：`TASK_TIMEOUT_SECONDS`、`PER_GAME_TIMEOUT_SECONDS`、`FINALIZE_TIMEOUT_SECONDS`、`CHECKOUT_SCAN_TIMEOUT_MS`。
+  - 结账容器扫描、等待循环改为 monotonic 墙钟截止；结账安全验证要求 claimed 或可点击 checkout 的强确认。
+  - 点击失败输出 `place_order_unclickable` 并停止空转；购物车结账递归改为有限次。
+  - 每游戏输出 `game_result` 结构化日志；CI 收紧 captcha/task 预算并增强 failure diagnostics。
+  - 静态验证：`py_compile` + `ast.parse` 通过。

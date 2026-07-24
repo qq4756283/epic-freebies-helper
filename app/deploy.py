@@ -58,36 +58,52 @@ async def execute_browser_tasks(headless: bool = True):
     Args:
         headless: Whether to run browser in headless mode
     """
-    logger.debug("Starting Epic Games collection task")
+    task_timeout = max(60, int(settings.TASK_TIMEOUT_SECONDS))
+    logger.debug(
+        "Starting Epic Games collection task | task_timeout_seconds={}",
+        task_timeout,
+    )
 
-    # Configure browser with anti-detection features and video recording
-    async with open_browser_context(headless=headless) as browser:
-        # Initialize or reuse existing browser page
-        page = browser.pages[0] if browser.pages else await browser.new_page()
-        logger.debug("Browser initialized successfully")
+    async def _run_browser_workflow():
+        # Configure browser with anti-detection features and video recording
+        async with open_browser_context(headless=headless) as browser:
+            # Initialize or reuse existing browser page
+            page = browser.pages[0] if browser.pages else await browser.new_page()
+            logger.debug("Browser initialized successfully")
 
-        # Handle Epic Games authentication
-        logger.debug("Initiating Epic Games authentication")
-        agent = EpicAuthorization(page)
-        is_authenticated = await agent.invoke()
-        if not is_authenticated:
-            raise RuntimeError("Authentication failed, aborting this run")
-        logger.debug("Authentication completed")
+            # Handle Epic Games authentication
+            logger.debug("Initiating Epic Games authentication")
+            agent = EpicAuthorization(page)
+            is_authenticated = await agent.invoke()
+            if not is_authenticated:
+                raise RuntimeError("Authentication failed, aborting this run")
+            logger.debug("Authentication completed")
 
-        # Execute a free games collection on new page
-        logger.debug("Starting free games collection process")
-        game_page = await browser.new_page()
-        agent = EpicAgent(game_page)
-        await agent.collect_epic_games()
-        logger.debug("Free games collection completed")
+            # Execute a free games collection on new page
+            logger.debug("Starting free games collection process")
+            game_page = await browser.new_page()
+            agent = EpicAgent(game_page)
+            await agent.collect_epic_games()
+            logger.debug("Free games collection completed")
 
-        # Cleanup browser resources
-        logger.debug("Cleaning up browser resources")
-        with suppress(Exception):
-            for p in browser.pages:
-                await p.close()
+            # Cleanup browser resources
+            logger.debug("Cleaning up browser resources")
+            with suppress(Exception):
+                for p in browser.pages:
+                    await p.close()
 
-        logger.debug("Browser tasks execution finished successfully")
+            logger.debug("Browser tasks execution finished successfully")
+
+    started = datetime.now(TIMEZONE)
+    try:
+        await asyncio.wait_for(_run_browser_workflow(), timeout=task_timeout)
+    except asyncio.TimeoutError as err:
+        elapsed = int((datetime.now(TIMEZONE) - started).total_seconds())
+        message = (
+            f"task_budget_exceeded:elapsed={elapsed}s budget={task_timeout}s"
+        )
+        logger.error(message)
+        raise RuntimeError(message) from err
 
 
 async def deploy():

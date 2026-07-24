@@ -44,6 +44,46 @@ CHECKOUT_BUTTON_TEXTS = ("PLACE ORDER", "ADD TO LIBRARY", "GET", "GET FREE", "GE
 PurchaseContainer = FrameLocator | Frame | Page
 
 
+class PerGameTimeoutError(RuntimeError):
+    """Raised when a single promotion exceeds its wall-clock budget."""
+
+
+class GameResult:
+    CLAIMED = "claimed"
+    ALREADY_OWNED = "already_owned"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+    def __init__(self, status: str, reason: str, title: str, url: str, elapsed_s: float):
+        self.status = status
+        self.reason = reason
+        self.title = title
+        self.url = url
+        self.elapsed_s = elapsed_s
+
+    def log(self) -> None:
+        logger.info(
+            "game_result title={!r} url={!r} status={} reason={} elapsed_s={:.1f}",
+            self.title,
+            self.url,
+            self.status,
+            self.reason,
+            self.elapsed_s,
+        )
+
+
+def _deadline_remaining_ms(deadline: float | None) -> int | None:
+    if deadline is None:
+        return None
+    return max(0, int((deadline - time.monotonic()) * 1000))
+
+
+def _ensure_deadline(deadline: float | None, label: str) -> None:
+    remaining = _deadline_remaining_ms(deadline)
+    if remaining is not None and remaining <= 0:
+        raise PerGameTimeoutError(f"per_game_timeout:{label}")
+
+
 def get_promotions() -> List[PromotionGame]:
     """获取周免游戏数据"""
 
@@ -963,13 +1003,27 @@ class EpicGames:
 
     @staticmethod
     async def _active_purchase_container(
-        page: Page, place_order_timeout: int = 15000, confirm_timeout: int = 5000
+        page: Page,
+        place_order_timeout: int = 15000,
+        confirm_timeout: int = 5000,
+        scan_timeout_ms: int | None = None,
     ):
         logger.debug("Looking for checkout submit button...")
+        if scan_timeout_ms is None:
+            scan_timeout_ms = max(500, int(settings.CHECKOUT_SCAN_TIMEOUT_MS))
+
+        deadline = time.monotonic() + (scan_timeout_ms / 1000.0)
         containers = await EpicGames._ordered_checkout_containers(page)
+
         for container in containers:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+
             with suppress(Exception):
-                body_text = await container.locator("body").inner_text(timeout=500)
+                body_text = await container.locator("body").inner_text(
+                    timeout=min(500, remaining_ms)
+                )
                 frame_url = getattr(container, "url", "") or ""
                 looks_checkout = EpicGames._looks_like_checkout_frame(body_text)
                 url_hint = any(
@@ -983,11 +1037,15 @@ class EpicGames:
                 )
 
                 for button_text in CHECKOUT_BUTTON_TEXTS:
+                    remaining_ms = int((deadline - time.monotonic()) * 1000)
+                    if remaining_ms <= 0:
+                        break
+                    button_timeout = min(place_order_timeout, remaining_ms, 1500)
                     checkout_btn = container.locator("button", has_text=button_text)
                     try:
-                        await expect(checkout_btn).to_be_visible(timeout=place_order_timeout)
+                        await expect(checkout_btn).to_be_visible(timeout=button_timeout)
                         logger.debug(
-                            "✅ Found '{}' button in checkout container url='{}'",
+                            "Found '{}' button in checkout container url='{}'",
                             button_text,
                             frame_url,
                         )
@@ -995,27 +1053,39 @@ class EpicGames:
                     except AssertionError:
                         pass
 
-                try:
-                    await expect(confirm_btn).to_be_visible(timeout=confirm_timeout)
-                    logger.debug(
-                        "✅ Found payment confirm button in checkout container url='{}'",
-                        frame_url,
-                    )
-                    return container, confirm_btn
-                except AssertionError:
-                    pass
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms > 0:
+                    try:
+                        await expect(confirm_btn).to_be_visible(
+                            timeout=min(confirm_timeout, remaining_ms, 1500)
+                        )
+                        logger.debug(
+                            "Found payment confirm button in checkout container url='{}'",
+                            frame_url,
+                        )
+                        return container, confirm_btn
+                    except AssertionError:
+                        pass
 
-                try:
-                    purchase_cta = container.locator("button[data-testid='purchase-cta-button']")
-                    await expect(purchase_cta).to_be_visible(timeout=confirm_timeout)
-                    logger.debug("✅ Found purchase-cta-button by data-testid in container url='{}'", frame_url)
-                    return container, purchase_cta
-                except AssertionError:
-                    pass
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms > 0:
+                    try:
+                        purchase_cta = container.locator(
+                            "button[data-testid='purchase-cta-button']"
+                        )
+                        await expect(purchase_cta).to_be_visible(
+                            timeout=min(confirm_timeout, remaining_ms, 1500)
+                        )
+                        logger.debug(
+                            "Found purchase-cta-button by data-testid in container url='{}'",
+                            frame_url,
+                        )
+                        return container, purchase_cta
+                    except AssertionError:
+                        pass
 
         logger.warning("Primary buttons not found in checkout containers.")
         raise AssertionError("Could not find checkout submit button in checkout containers")
-
     @staticmethod
     async def _uk_confirm_order(wpc: PurchaseContainer):
         logger.debug("UK confirm order")
@@ -1060,20 +1130,24 @@ class EpicGames:
     async def _wait_for_checkout_ready(
         self, page: Page, url: str, timeout_ms: int = 15000
     ) -> tuple[PurchaseContainer, object] | None:
-        elapsed = 0
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
 
-        while elapsed < timeout_ms:
+        while time.monotonic() < deadline:
             if await self._is_checkout_security_check_visible(page):
                 logger.debug(f"Checkout readiness interrupted by security check. {url=}")
                 return None
 
+            remaining_ms = max(100, int((deadline - time.monotonic()) * 1000))
+            scan_ms = min(int(settings.CHECKOUT_SCAN_TIMEOUT_MS), remaining_ms)
             try:
                 payload = await self._active_purchase_container(
-                    page, place_order_timeout=500, confirm_timeout=500
+                    page,
+                    place_order_timeout=min(500, remaining_ms),
+                    confirm_timeout=min(500, remaining_ms),
+                    scan_timeout_ms=scan_ms,
                 )
             except AssertionError:
-                await page.wait_for_timeout(500)
-                elapsed += 500
+                await page.wait_for_timeout(min(500, remaining_ms))
                 continue
 
             _wpc, payment_btn = payload
@@ -1089,16 +1163,15 @@ class EpicGames:
                 overlay_id,
                 await self._payment_button_state(payment_btn),
             )
-            await page.wait_for_timeout(750)
-            elapsed += 750
+            sleep_ms = min(750, max(100, int((deadline - time.monotonic()) * 1000)))
+            await page.wait_for_timeout(sleep_ms)
 
         logger.debug(f"Checkout container never became ready before timeout. {url=}")
         return None
-
     async def _wait_for_purchase_state(self, page: Page, url: str, timeout_ms: int = 20000):
-        elapsed = 0
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
 
-        while elapsed < timeout_ms:
+        while time.monotonic() < deadline:
             await self._handle_device_not_supported_modal(page, url, timeout_ms=1000)
 
             if await self._is_claimed_state(page, url):
@@ -1107,15 +1180,17 @@ class EpicGames:
             if await self._is_checkout_security_check_visible(page):
                 return "security", None
 
-            payload = await self._wait_for_checkout_ready(page, url, timeout_ms=1000)
+            remaining_ms = max(100, int((deadline - time.monotonic()) * 1000))
+            payload = await self._wait_for_checkout_ready(
+                page, url, timeout_ms=min(1000, remaining_ms)
+            )
             if payload is not None:
                 return "checkout", payload
 
-            await page.wait_for_timeout(500)
-            elapsed += 1500
+            sleep_ms = min(500, max(100, int((deadline - time.monotonic()) * 1000)))
+            await page.wait_for_timeout(sleep_ms)
 
         return "pending", None
-
     @staticmethod
     async def _is_checkout_security_check_visible(page: Page) -> bool:
         page_markers = [
@@ -1172,6 +1247,35 @@ class EpicGames:
         attempt = 0
         consecutive_failures = 0
         last_error_kind = "captcha_unknown_error"
+        inconclusive_clears = 0
+
+        async def _strong_success() -> bool:
+            if await self._is_claimed_state(page, url):
+                logger.success(
+                    f"Checkout security check resolved into claimed state - {url=}"
+                )
+                return True
+
+            remaining_ms = max(
+                500,
+                max_wait_ms - int((time.monotonic() - started_at) * 1000),
+            )
+            payload = await self._wait_for_checkout_ready(
+                page, url, timeout_ms=min(5000, remaining_ms)
+            )
+            if payload is None:
+                return False
+
+            _wpc, payment_btn = payload
+            if await self._visible_talon_overlay_id(page):
+                return False
+            if await self._has_disabled_payment_state(payment_btn):
+                return False
+
+            logger.success(
+                f"Checkout security check cleared to clickable checkout - {url=}"
+            )
+            return True
 
         while (time.monotonic() - started_at) * 1000 < max_wait_ms and attempt < max_attempts:
             attempt += 1
@@ -1181,10 +1285,20 @@ class EpicGames:
                 return True
 
             if not await self._is_checkout_security_check_visible(page):
-                logger.success(
-                    f"Checkout security check cleared before solve attempt {attempt} - {url=}"
+                if await _strong_success():
+                    return True
+                inconclusive_clears += 1
+                logger.warning(
+                    "security_check_inconclusive: captcha not visible but checkout not ready "
+                    f"(attempt {attempt}, clears={inconclusive_clears}) | {url=}"
                 )
-                return True
+                if inconclusive_clears >= 2:
+                    await self._capture_purchase_debug(
+                        page, "checkout_security_check_inconclusive", url
+                    )
+                    return False
+                await page.wait_for_timeout(1500)
+                continue
 
             elapsed_seconds = int(time.monotonic() - started_at)
             logger.info(
@@ -1198,10 +1312,12 @@ class EpicGames:
 
             await page.wait_for_timeout(2500)
 
+            challenge_failed = False
             try:
                 await agent.wait_for_challenge()
                 consecutive_failures = 0
             except Exception as err:
+                challenge_failed = True
                 consecutive_failures += 1
                 last_error_kind = settings.classify_captcha_error(err)
                 logger.warning(
@@ -1211,7 +1327,6 @@ class EpicGames:
                     await self._capture_purchase_debug(
                         page, f"checkout_security_check_failed_{attempt}", url
                     )
-                # Hard-fail early when the solver is repeatedly producing unusable answers.
                 if consecutive_failures >= 4 and last_error_kind in {
                     "captcha_schema_error",
                     "captcha_empty_response",
@@ -1228,15 +1343,20 @@ class EpicGames:
 
             await page.wait_for_timeout(1500)
 
-            if await self._is_claimed_state(page, url):
-                logger.success(
-                    f"Checkout security check solved successfully into claimed state - {url=}"
-                )
+            if await _strong_success():
                 return True
 
-            if not await self._is_checkout_security_check_visible(page):
-                logger.success(f"Checkout security check solved successfully - {url=}")
-                return True
+            if challenge_failed and not await self._is_checkout_security_check_visible(page):
+                inconclusive_clears += 1
+                logger.warning(
+                    "security_check_inconclusive after challenge failure "
+                    f"(attempt {attempt}, clears={inconclusive_clears}) | {url=}"
+                )
+                if inconclusive_clears >= 2:
+                    await self._capture_purchase_debug(
+                        page, "checkout_security_check_inconclusive", url
+                    )
+                    return False
 
             outcome = await self._observe_checkout_outcome(page, url, timeout_ms=10000)
             logger.debug(
@@ -1245,19 +1365,17 @@ class EpicGames:
             if outcome == "claimed":
                 logger.success(f"Checkout security check resolved into claimed state - {url=}")
                 return True
-            if outcome == "checkout":
-                logger.success(f"Checkout security check cleared back to checkout - {url=}")
+            if outcome == "checkout" and await _strong_success():
                 return True
 
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         logger.warning(
-            "Checkout security check remained visible after budget - "
+            "Checkout security check remained unresolved after budget - "
             f"attempts={attempt}/{max_attempts} elapsed_ms={elapsed_ms}/{max_wait_ms} "
             f"kind={last_error_kind} | {url=}"
         )
-        await self._capture_purchase_debug(page, "checkout_security_check_unresolved", url)
+        await self._capture_purchase_debug(page, "checkout_security_check_timeout", url)
         return False
-
     async def _probe_checkout_challenge(self, page: Page, agent: AgentV, url: str) -> bool:
         logger.debug(f"Probing checkout for latent challenge. {url=}")
         if await self._is_checkout_security_check_visible(page):
@@ -1341,10 +1459,14 @@ class EpicGames:
         *,
         attempts: int = 4,
         revisit_product_page: bool = True,
+        deadline: float | None = None,
     ) -> bool:
         url = promotion.url
+        attempts = max(1, attempts)
 
         for attempt in range(1, attempts + 1):
+            _ensure_deadline(deadline, "confirm_promotion_claimed")
+
             if revisit_product_page:
                 try:
                     await page.goto(url, wait_until="load", timeout=15000)
@@ -1361,7 +1483,11 @@ class EpicGames:
 
             await self._handle_device_not_supported_modal(page, url, timeout_ms=5000)
 
-            state, _payload = await self._wait_for_purchase_state(page, url, timeout_ms=12000)
+            remaining_ms = _deadline_remaining_ms(deadline)
+            state_timeout = 12000 if remaining_ms is None else min(12000, max(1000, remaining_ms))
+            state, _payload = await self._wait_for_purchase_state(
+                page, url, timeout_ms=state_timeout
+            )
             if state in {"checkout", "security"}:
                 logger.warning(
                     "Promotion reconciliation found the checkout flow still active "
@@ -1371,9 +1497,14 @@ class EpicGames:
                     state,
                     url,
                 )
-                if await self._handle_instant_checkout(page, promotion, allow_finalize=False):
+                if await self._handle_instant_checkout(
+                    page,
+                    promotion,
+                    allow_finalize=False,
+                    deadline=deadline,
+                ):
                     logger.success(
-                        "🎉 Promotion recovered by resuming checkout during reconciliation "
+                        "Promotion recovered by resuming checkout during reconciliation "
                         "(attempt {}) - title='{}' url='{}'",
                         attempt,
                         promotion.title,
@@ -1383,7 +1514,7 @@ class EpicGames:
 
             if await self._is_claimed_state(page, url):
                 logger.success(
-                    "🎉 Promotion confirmed from product page during reconciliation "
+                    "Promotion confirmed from product page during reconciliation "
                     "(attempt {}) - title='{}' url='{}'",
                     attempt,
                     promotion.title,
@@ -1393,7 +1524,7 @@ class EpicGames:
 
             if await self._is_promotion_in_order_history(promotion):
                 logger.success(
-                    "🎉 Promotion confirmed via order history during reconciliation "
+                    "Promotion confirmed via order history during reconciliation "
                     "(attempt {}) - title='{}' url='{}'",
                     attempt,
                     promotion.title,
@@ -1405,10 +1536,33 @@ class EpicGames:
                 await page.wait_for_timeout(2500 * attempt)
 
         return False
+    async def _finalize_unconfirmed_checkout(
+        self,
+        page: Page,
+        promotion: PromotionGame,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        finalize_budget = max(15, int(settings.FINALIZE_TIMEOUT_SECONDS))
+        finalize_deadline = time.monotonic() + finalize_budget
+        if deadline is not None:
+            finalize_deadline = min(finalize_deadline, deadline)
 
-    async def _finalize_unconfirmed_checkout(self, page: Page, promotion: PromotionGame) -> bool:
-        return await self._confirm_promotion_claimed(page, promotion, attempts=4)
-
+        try:
+            return await self._confirm_promotion_claimed(
+                page,
+                promotion,
+                attempts=2,
+                revisit_product_page=True,
+                deadline=finalize_deadline,
+            )
+        except PerGameTimeoutError:
+            logger.warning(
+                "Finalize unconfirmed checkout hit wall-clock budget - title='{}' url='{}'",
+                promotion.title,
+                promotion.url,
+            )
+            return False
     @staticmethod
     async def _payment_button_state(payment_btn) -> str:
         parts: list[str] = []
@@ -1433,7 +1587,10 @@ class EpicGames:
         async def current_payment_button():
             with suppress(Exception):
                 _wpc, refreshed_btn = await self._active_purchase_container(
-                    self.page, place_order_timeout=1000, confirm_timeout=500
+                    self.page,
+                    place_order_timeout=1000,
+                    confirm_timeout=500,
+                    scan_timeout_ms=min(2000, int(settings.CHECKOUT_SCAN_TIMEOUT_MS)),
                 )
                 return refreshed_btn
             return payment_btn
@@ -1501,17 +1658,18 @@ class EpicGames:
             await self.page.wait_for_timeout(750)
 
         logger.warning(
-            "All Place Order submission strategies completed without a visible click success. {} | {}",
+            "place_order_unclickable: all Place Order submission strategies completed without success. {} | {}",
             url,
             await self._payment_button_state(payment_btn),
         )
+
         await self.page.wait_for_timeout(1500)
         return False
 
     async def _observe_checkout_outcome(self, page: Page, url: str, timeout_ms: int = 20000) -> str:
-        elapsed = 0
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
 
-        while elapsed < timeout_ms:
+        while time.monotonic() < deadline:
             await self._handle_device_not_supported_modal(page, url, timeout_ms=1000)
 
             if await self._is_checkout_security_check_visible(page):
@@ -1520,57 +1678,87 @@ class EpicGames:
             if await self._is_claimed_state(page, url):
                 return "claimed"
 
+            remaining_ms = max(100, int((deadline - time.monotonic()) * 1000))
             with suppress(Exception):
                 await self._active_purchase_container(
-                    page, place_order_timeout=500, confirm_timeout=500
+                    page,
+                    place_order_timeout=min(500, remaining_ms),
+                    confirm_timeout=min(500, remaining_ms),
+                    scan_timeout_ms=min(int(settings.CHECKOUT_SCAN_TIMEOUT_MS), remaining_ms),
                 )
+                return "checkout"
 
-            await page.wait_for_timeout(1000)
-            elapsed += 1500
+            await page.wait_for_timeout(min(1000, remaining_ms))
 
         return "checkout"
-
     async def _handle_instant_checkout(
-        self, page: Page, promotion: PromotionGame, *, allow_finalize: bool = True
+        self,
+        page: Page,
+        promotion: PromotionGame,
+        *,
+        allow_finalize: bool = True,
+        deadline: float | None = None,
     ) -> bool:
         url = promotion.url
-        logger.info("🚀 Triggering Instant Checkout Flow...")
+        max_attempts = max(1, int(settings.PER_GAME_MAX_CHECKOUT_ATTEMPTS))
+        logger.info(
+            "Triggering Instant Checkout Flow... max_attempts={} | {}",
+            max_attempts,
+            url,
+        )
         agent = AgentV(page=page, agent_config=settings)
 
         try:
-            state, payload = await self._wait_for_purchase_state(page, url, timeout_ms=25000)
+            _ensure_deadline(deadline, "instant_checkout_start")
+            remaining = _deadline_remaining_ms(deadline)
+            state_timeout = 25000 if remaining is None else min(25000, max(2000, remaining))
+            state, payload = await self._wait_for_purchase_state(
+                page, url, timeout_ms=state_timeout
+            )
             if state == "claimed":
-                logger.success(f"🎉 Instant checkout resolved to claimed state - {url=}")
+                logger.success(f"Instant checkout resolved to claimed state - {url=}")
                 return True
 
             if state == "security":
                 if not await self._resolve_checkout_security_check(page, agent, url):
                     return False
-                state, payload = await self._wait_for_purchase_state(page, url, timeout_ms=25000)
+                _ensure_deadline(deadline, "after_security_check")
+                remaining = _deadline_remaining_ms(deadline)
+                state_timeout = 25000 if remaining is None else min(25000, max(2000, remaining))
+                state, payload = await self._wait_for_purchase_state(
+                    page, url, timeout_ms=state_timeout
+                )
                 if state == "claimed":
-                    logger.success(f"Instant checkout confirmed claim state after security check - {url=}")
+                    logger.success(
+                        f"Instant checkout confirmed claim state after security check - {url=}"
+                    )
                     return True
                 if state != "checkout" or payload is None:
                     state = "checkout"
                     payload = None
 
             if state != "checkout" or payload is None:
-                logger.warning(f"Instant checkout never reached a checkout container - {url=}")
+                logger.warning(
+                    f"Instant checkout never reached a checkout container - reason=checkout_unready {url=}"
+                )
                 await self._capture_purchase_debug(page, "instant_checkout_not_reached", url)
                 return False
 
-            for attempt in range(1, 5):
+            for attempt in range(1, max_attempts + 1):
+                _ensure_deadline(deadline, f"instant_checkout_attempt_{attempt}")
                 if state == "claimed":
-                    logger.success(f"🎉 Instant checkout confirmed claim state - {url=}")
+                    logger.success(f"Instant checkout confirmed claim state - {url=}")
                     return True
 
                 if state != "checkout" or payload is None:
+                    remaining = _deadline_remaining_ms(deadline)
+                    refresh_timeout = 10000 if remaining is None else min(10000, max(1000, remaining))
                     state, payload = await self._wait_for_purchase_state(
-                        page, url, timeout_ms=10000
+                        page, url, timeout_ms=refresh_timeout
                     )
                     if state == "claimed":
                         logger.success(
-                            f"🎉 Instant checkout confirmed claim state after state refresh - {url=}"
+                            f"Instant checkout confirmed claim state after state refresh - {url=}"
                         )
                         return True
                     if state == "security":
@@ -1583,29 +1771,49 @@ class EpicGames:
                         break
 
                 _wpc, payment_btn = payload
+                if await self._visible_talon_overlay_id(page) or await self._has_disabled_payment_state(
+                    payment_btn
+                ):
+                    logger.warning(
+                        "Checkout button present but not clickable yet; probing security state. {}",
+                        url,
+                    )
+                    if await self._is_checkout_security_check_visible(page):
+                        if not await self._resolve_checkout_security_check(page, agent, url):
+                            return False
+                        state = "checkout"
+                        payload = None
+                        continue
+
                 logger.debug(
                     "Place Order submission cycle ({}/{}) | button_text={}",
                     attempt,
-                    4,
+                    max_attempts,
                     await payment_btn.text_content(),
                 )
                 click_progressed = await self._submit_place_order(payment_btn, url)
                 if not click_progressed:
                     logger.warning(
-                        "Place Order submission produced no immediate progress; falling back to checkout probes. {}",
+                        "place_order_unclickable during instant checkout; stopping attempts. {}",
                         url,
                     )
+                    await self._capture_purchase_debug(page, "place_order_unclickable", url)
+                    break
 
                 if await self._is_checkout_security_check_visible(page):
                     if not await self._resolve_checkout_security_check(page, agent, url):
                         return False
-                    outcome = await self._observe_checkout_outcome(page, url, timeout_ms=20000)
+                    remaining = _deadline_remaining_ms(deadline)
+                    observe_timeout = 20000 if remaining is None else min(20000, max(1000, remaining))
+                    outcome = await self._observe_checkout_outcome(
+                        page, url, timeout_ms=observe_timeout
+                    )
                     logger.debug(
                         f"Checkout outcome after solving security check: {outcome} | {url=}"
                     )
                     if outcome == "claimed":
                         logger.success(
-                            f"🎉 Instant checkout confirmed claim state after security check - {url=}"
+                            f"Instant checkout confirmed claim state after security check - {url=}"
                         )
                         return True
                     state = "checkout" if outcome == "checkout" else outcome
@@ -1616,14 +1824,18 @@ class EpicGames:
                 with suppress(Exception):
                     await self._probe_checkout_challenge(page, agent, url)
 
-                outcome = await self._observe_checkout_outcome(page, url, timeout_ms=20000)
+                remaining = _deadline_remaining_ms(deadline)
+                observe_timeout = 20000 if remaining is None else min(20000, max(1000, remaining))
+                outcome = await self._observe_checkout_outcome(
+                    page, url, timeout_ms=observe_timeout
+                )
                 logger.debug(f"Checkout outcome after Place Order: {outcome} | {url=}")
                 if outcome == "claimed":
                     logger.success(
-                        f"🎉 Instant checkout confirmed claim state after Place Order - {url=}"
+                        f"Instant checkout confirmed claim state after Place Order - {url=}"
                     )
                     return True
-                if outcome == "checkout" and attempt >= 2:
+                if outcome == "checkout" and attempt >= max_attempts:
                     challenge_detected = await self._extended_checkout_challenge_probe(
                         page, agent, url
                     )
@@ -1631,11 +1843,19 @@ class EpicGames:
                         if not await self._resolve_checkout_security_check(page, agent, url):
                             return False
                     if challenge_detected:
-                        outcome = await self._observe_checkout_outcome(page, url, timeout_ms=30000)
-                        logger.debug(f"Checkout outcome after extended probe: {outcome} | {url=}")
+                        remaining = _deadline_remaining_ms(deadline)
+                        probe_timeout = (
+                            30000 if remaining is None else min(30000, max(1000, remaining))
+                        )
+                        outcome = await self._observe_checkout_outcome(
+                            page, url, timeout_ms=probe_timeout
+                        )
+                        logger.debug(
+                            f"Checkout outcome after extended probe: {outcome} | {url=}"
+                        )
                         if outcome == "claimed":
                             logger.success(
-                                f"🎉 Instant checkout confirmed claim state after extended probe - {url=}"
+                                f"Instant checkout confirmed claim state after extended probe - {url=}"
                             )
                             return True
                 state = "checkout" if outcome == "checkout" else outcome
@@ -1645,8 +1865,12 @@ class EpicGames:
             await self._capture_purchase_debug(page, "instant_checkout_unconfirmed", url)
             if not allow_finalize:
                 return False
-            return await self._finalize_unconfirmed_checkout(page, promotion)
+            return await self._finalize_unconfirmed_checkout(
+                page, promotion, deadline=deadline
+            )
 
+        except PerGameTimeoutError:
+            raise
         except Exception as err:
             logger.warning(f"Instant checkout warning: {err}")
             await self._capture_purchase_debug(page, "instant_checkout_warning", url)
@@ -1654,13 +1878,14 @@ class EpicGames:
                 logger.debug(f"Instant checkout fallback | current_url={page.url}")
             await self._handle_device_not_supported_modal(page, url, timeout_ms=5000)
             if await self._is_claimed_state(page, url):
-                logger.success(f"🎉 Instant checkout recovered into claimed state - {url=}")
+                logger.success(f"Instant checkout recovered into claimed state - {url=}")
                 return True
 
             if not allow_finalize:
                 return False
-            return await self._finalize_unconfirmed_checkout(page, promotion)
-
+            return await self._finalize_unconfirmed_checkout(
+                page, promotion, deadline=deadline
+            )
     async def add_promotion_to_cart(
         self, page: Page, promotions: List[PromotionGame]
     ) -> tuple[bool, int, List[str]]:
@@ -1676,88 +1901,95 @@ class EpicGames:
             "IN YOUR LIBRARY",
             "OWN THIS GAME",
         ]
+        per_game_timeout = max(30, int(settings.PER_GAME_TIMEOUT_SECONDS))
 
         for promotion in promotions:
             url = promotion.url
             game_title = promotion.title
-            if not await self._goto_product_page(page, url, game_title):
-                failed_urls.append(url)
-                continue
+            started = time.monotonic()
+            deadline = started + per_game_timeout
 
-            # 404 检测
-            title = await page.title()
-            if "404" in title or "Page Not Found" in title:
-                logger.error(f"❌ Invalid URL (404 Page): {url}")
-                failed_urls.append(url)
-                continue
+            def _log_result(status: str, reason: str) -> None:
+                GameResult(
+                    status,
+                    reason,
+                    game_title,
+                    url,
+                    time.monotonic() - started,
+                ).log()
 
-            # 处理年龄限制弹窗
             try:
-                continue_btn = page.locator("//button//span[text()='Continue']")
-                if await continue_btn.is_visible(timeout=5000):
-                    await continue_btn.click()
-            except Exception:
-                pass
-
-            # ------------------------------------------------------------
-            # 🔥 新思路：彻底解决按钮识别问题 (黑名单机制 + 智能点击)
-            # ------------------------------------------------------------
-
-            # 1. 尝试找到所有可能的“主按钮”
-            # Epic 按钮通常有 'purchase-cta-button' 这个 TestID
-            purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
-
-            # 2. 如果没找到主按钮，尝试找“库中”状态
-            try:
-                if not await purchase_btn.is_visible(timeout=5000):
-                    # 再次检查是否在库中 (有时按钮不叫 purchase-cta，而是简单的 disabled button)
-                    all_text = (await page.locator("body").text_content() or "").upper()
-                    if any(marker in all_text for marker in owned_markers):
-                        logger.success(
-                            "Game already claimed / already in library (page text scan) - "
-                            f"title='{game_title}' url='{url}'"
-                        )
-                        continue
-                    logger.warning(f"Could not find any purchase button - {url=}")
-                    await self._capture_purchase_debug(page, "button_missing", url)
+                _ensure_deadline(deadline, "before_navigation")
+                if not await self._goto_product_page(page, url, game_title):
                     failed_urls.append(url)
+                    _log_result(GameResult.FAILED, "navigation_failed")
                     continue
-            except Exception:
-                pass
 
-            # 3. 获取按钮上下文
-            btn_text, container_text, disabled, aria_disabled = (
-                await self._log_purchase_button_context(page, purchase_btn, url)
-            )
-            btn_text_upper = btn_text.upper()
-            container_text_upper = container_text.upper()
+                title = await page.title()
+                if "404" in title or "Page Not Found" in title:
+                    logger.error(f"Invalid URL (404 Page): {url}")
+                    failed_urls.append(url)
+                    _log_result(GameResult.FAILED, "navigation_failed")
+                    continue
 
-            logger.debug(f"👉 Found Button: '{btn_text}'")
+                try:
+                    continue_btn = page.locator("//button//span[text()='Continue']")
+                    if await continue_btn.is_visible(timeout=5000):
+                        await continue_btn.click()
+                except Exception:
+                    pass
 
-            # 4. 黑名单检查：只有这些情况绝对不能点
-            # 如果是 'IN LIBRARY', 'OWNED', 'UNAVAILABLE', 'COMING SOON' -> 跳过
-            if disabled is not None or aria_disabled == "true":
-                logger.success(
-                    "Game already claimed / unavailable (purchase button disabled) - "
-                    f"title='{game_title}' text='{btn_text}' url='{url}'"
+                purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
+
+                try:
+                    if not await purchase_btn.is_visible(timeout=5000):
+                        all_text = (await page.locator("body").text_content() or "").upper()
+                        if any(marker in all_text for marker in owned_markers):
+                            logger.success(
+                                "Game already claimed / already in library (page text scan) - "
+                                f"title='{game_title}' url='{url}'"
+                            )
+                            _log_result(GameResult.ALREADY_OWNED, "already_owned")
+                            continue
+                        logger.warning(f"Could not find any purchase button - {url=}")
+                        await self._capture_purchase_debug(page, "button_missing", url)
+                        failed_urls.append(url)
+                        _log_result(GameResult.FAILED, "checkout_unready")
+                        continue
+                except Exception:
+                    pass
+
+                btn_text, container_text, disabled, aria_disabled = (
+                    await self._log_purchase_button_context(page, purchase_btn, url)
                 )
-                await self._capture_purchase_debug(page, "button_disabled", url)
-                continue
+                btn_text_upper = btn_text.upper()
+                container_text_upper = container_text.upper()
+                logger.debug(f"Found Button: '{btn_text}'")
 
-            if any(marker in btn_text_upper for marker in owned_markers) or any(
-                marker in container_text_upper for marker in owned_markers
-            ):
-                logger.success(
-                    f"Game already claimed / already in library - title='{game_title}' text='{btn_text}' url='{url}'"
-                )
-                continue
+                if disabled is not None or aria_disabled == "true":
+                    logger.success(
+                        "Game already claimed / unavailable (purchase button disabled) - "
+                        f"title='{game_title}' text='{btn_text}' url='{url}'"
+                    )
+                    await self._capture_purchase_debug(page, "button_disabled", url)
+                    _log_result(GameResult.ALREADY_OWNED, "already_owned")
+                    continue
 
-            region_unavailable_markers = [
-                "CURRENTLY UNAVAILABLE IN YOUR PLATFORM OR REGION",
-                "CONTENT IS CURRENTLY UNAVAILABLE",
-            ]
-            if not btn_text and not container_text:
-                with suppress(Exception):
+                if any(marker in btn_text_upper for marker in owned_markers) or any(
+                    marker in container_text_upper for marker in owned_markers
+                ):
+                    logger.success(
+                        "Game already claimed / already in library - "
+                        f"title='{game_title}' text='{btn_text}' url='{url}'"
+                    )
+                    _log_result(GameResult.ALREADY_OWNED, "already_owned")
+                    continue
+
+                region_unavailable_markers = [
+                    "CURRENTLY UNAVAILABLE IN YOUR PLATFORM OR REGION",
+                    "CONTENT IS CURRENTLY UNAVAILABLE",
+                ]
+                if not btn_text and not container_text:
                     body_text = (await page.locator("body").text_content(timeout=2000) or "").upper()
                     if any(marker in body_text for marker in region_unavailable_markers):
                         logger.success(
@@ -1765,43 +1997,70 @@ class EpicGames:
                             f"title='{game_title}' url='{url}'"
                         )
                         await self._capture_purchase_debug(page, "region_unavailable", url)
+                        _log_result(GameResult.FAILED, "checkout_unready")
                         continue
 
-            # 5. 白名单检查 (Add to Cart 特殊处理)
-            # 如果包含 'CART'，说明是加入购物车流程
-            if "CART" in btn_text_upper:
-                logger.debug(f"🛒 Logic: Add To Cart - {url=}")
+                _ensure_deadline(deadline, "before_purchase_click")
+
+                if "CART" in btn_text_upper:
+                    logger.debug(f"Logic: Add To Cart - {url=}")
+                    if not await self._click_purchase_button(page, purchase_btn, url):
+                        failed_urls.append(url)
+                        _log_result(GameResult.FAILED, "place_order_unclickable")
+                        continue
+                    has_pending_cart_items = True
+                    _log_result("pending", "cart_pending")
+                    continue
+
+                logger.debug(f"Logic: Aggressive Click (Text: {btn_text}) - {url=}")
+                if await EpicGames._is_device_not_supported_visible(page):
+                    logger.warning(
+                        f"Pre-click: device not supported modal detected, dismissing first. {url=}"
+                    )
+                    await EpicGames._handle_device_not_supported_modal(
+                        page, url, timeout_ms=5000
+                    )
+
                 if not await self._click_purchase_button(page, purchase_btn, url):
                     failed_urls.append(url)
+                    _log_result(GameResult.FAILED, "place_order_unclickable")
                     continue
-                has_pending_cart_items = True
-                continue
 
-            # 6. 默认处理 (盲点逻辑)
-            # 只要不是黑名单，也不是购物车，统统当做 "Get/Purchase" 直接点击！
-            # 不管它写的是 'Get', 'Free', 'Purchase', 'Buy Now'，只要 API 说是免费的，我们就点！
-            logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
-            if await EpicGames._is_device_not_supported_visible(page):
+                await self._handle_device_not_supported_modal(page, url)
+
+                if await self._handle_instant_checkout(
+                    page, promotion, deadline=deadline
+                ):
+                    instant_claimed += 1
+                    _log_result(GameResult.CLAIMED, "claimed")
+                else:
+                    failed_urls.append(url)
+                    _log_result(GameResult.FAILED, "checkout_unready")
+
+            except PerGameTimeoutError as err:
                 logger.warning(
-                    f"Pre-click: device not supported modal detected, dismissing first. {url=}"
+                    "Per-game timeout while processing promotion - title='{}' url='{}' err={}",
+                    game_title,
+                    url,
+                    err,
                 )
-                await EpicGames._handle_device_not_supported_modal(page, url, timeout_ms=5000)
-
-            if not await self._click_purchase_button(page, purchase_btn, url):
-                failed_urls.append(url)
-                continue
-
-            await self._handle_device_not_supported_modal(page, url)
-
-            # 点击后，转入即时结账流程
-            if await self._handle_instant_checkout(page, promotion):
-                instant_claimed += 1
-            else:
-                failed_urls.append(url)
-            # ------------------------------------------------------------
+                await self._capture_purchase_debug(page, "per_game_timeout", url)
+                if url not in failed_urls:
+                    failed_urls.append(url)
+                _log_result(GameResult.TIMEOUT, "per_game_timeout")
+            except Exception as err:
+                logger.warning(
+                    "Unexpected error while processing promotion - title='{}' url='{}' err={!r}",
+                    game_title,
+                    url,
+                    err,
+                )
+                await self._capture_purchase_debug(page, "promotion_exception", url)
+                if url not in failed_urls:
+                    failed_urls.append(url)
+                _log_result(GameResult.FAILED, "checkout_unready")
 
         return has_pending_cart_items, instant_claimed, failed_urls
-
     async def _empty_cart(self, page: Page, wait_rerender: int = 30) -> bool | None:
         has_paid_free = False
         try:
@@ -1824,7 +2083,8 @@ class EpicGames:
             logger.warning("Failed to empty shopping cart", err=err)
             return False
 
-    async def _purchase_free_game(self):
+    async def _purchase_free_game(self, attempt: int = 1):
+        max_attempts = max(1, int(settings.CART_CHECKOUT_MAX_ATTEMPTS))
         await self.page.goto(URL_CART, wait_until="domcontentloaded")
         logger.debug("Move ALL paid games from the shopping cart out")
         await self._empty_cart(self.page)
@@ -1835,15 +2095,20 @@ class EpicGames:
 
         try:
             logger.debug("Move to webPurchaseContainer iframe")
-            wpc, payment_btn = await self._active_purchase_container(self.page)
+            wpc, payment_btn = await self._active_purchase_container(
+                self.page, scan_timeout_ms=int(settings.CHECKOUT_SCAN_TIMEOUT_MS)
+            )
             logger.debug("Click payment button")
             await self._uk_confirm_order(wpc)
             await agent.wait_for_challenge()
         except Exception as err:
-            logger.warning(f"Failed to solve captcha - {err}")
+            logger.warning(
+                f"Failed to solve captcha - {err} (attempt {attempt}/{max_attempts})"
+            )
+            if attempt >= max_attempts:
+                raise RuntimeError("cart_checkout_retry_exhausted") from err
             await self.page.reload()
-            return await self._purchase_free_game()
-
+            return await self._purchase_free_game(attempt=attempt + 1)
     @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
     async def collect_weekly_games(self, promotions: List[PromotionGame]):
         has_cart_items, instant_claimed, failed_urls = await self.add_promotion_to_cart(
@@ -1875,8 +2140,15 @@ class EpicGames:
                     promotion.title,
                     failed_url,
                 )
+                reconcile_deadline = time.monotonic() + max(
+                    30, int(settings.FINALIZE_TIMEOUT_SECONDS)
+                )
                 if await self._confirm_promotion_claimed(
-                    self.page, promotion, attempts=3, revisit_product_page=True
+                    self.page,
+                    promotion,
+                    attempts=2,
+                    revisit_product_page=True,
+                    deadline=reconcile_deadline,
                 ):
                     recovered_urls.append(failed_url)
                     continue

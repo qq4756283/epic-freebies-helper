@@ -125,6 +125,9 @@ jobs:
             echo "## Runtime config"
             echo
             echo "- Job timeout: \`45m\`"
+            echo "- TASK_TIMEOUT_SECONDS: \`1500\`"
+            echo "- PER_GAME_TIMEOUT_SECONDS: \`300\`"
+            echo "- CHECKOUT_CAPTCHA_MAX_WAIT_MS: \`240000\`"
             echo "- LLM_PROVIDER: \`${provider:-auto}\`"
             echo "- GLM_MODEL: \`${GLM_MODEL:-default}\`"
             echo "- GEMINI_MODEL: \`${GEMINI_MODEL:-default}\`"
@@ -159,9 +162,16 @@ jobs:
           PYTHONPATH: app
           # Captcha fail-fast budgets (seconds / attempts)
           LOGIN_CAPTCHA_MAX_ATTEMPTS: "3"
-          LOGIN_CAPTCHA_MAX_SECONDS: "600"
-          CHECKOUT_CAPTCHA_MAX_ATTEMPTS: "8"
-          CHECKOUT_CAPTCHA_MAX_WAIT_MS: "720000"
+          LOGIN_CAPTCHA_MAX_SECONDS: "300"
+          CHECKOUT_CAPTCHA_MAX_ATTEMPTS: "4"
+          CHECKOUT_CAPTCHA_MAX_WAIT_MS: "240000"
+          # App-level budgets (must stay under job timeout-minutes: 45)
+          TASK_TIMEOUT_SECONDS: "1500"
+          PER_GAME_TIMEOUT_SECONDS: "300"
+          PER_GAME_MAX_CHECKOUT_ATTEMPTS: "2"
+          CHECKOUT_SCAN_TIMEOUT_MS: "3000"
+          FINALIZE_TIMEOUT_SECONDS: "90"
+          CART_CHECKOUT_MAX_ATTEMPTS: "2"
         run: |
           echo "🚀 启动定时领取任务（支持 Gemini/AiHubMix/GLM）..."
           xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run app/deploy.py
@@ -194,13 +204,16 @@ jobs:
             echo "- \`JSONDecodeError\` / empty \`checkcaptcha\` response"
             echo "- \`Wait for captcha response timeout\`"
             echo "- \`captcha_budget_exceeded\`"
+            echo "- \`task_budget_exceeded\` / \`per_game_timeout\`"
+            echo "- \`place_order_unclickable\` / \`security_check_inconclusive\`"
+            echo "- \`game_result\` structured per-game outcome"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ -d app/volumes/logs ]; then
             echo >> "$GITHUB_STEP_SUMMARY"
             echo "### Recent log markers" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-            grep -RniE "ValidationError|ImageDragDropChallenge|JSONDecodeError|Wait for captcha|captcha_budget_exceeded|Authentication failed|Invalid LLM configuration|The operation was canceled" app/volumes/logs 2>/dev/null | tail -n 40 >> "$GITHUB_STEP_SUMMARY" || true
+            grep -RniE "ValidationError|ImageDragDropChallenge|JSONDecodeError|Wait for captcha|captcha_budget_exceeded|task_budget_exceeded|per_game_timeout|place_order_unclickable|security_check_inconclusive|game_result|Authentication failed|Invalid LLM configuration|The operation was canceled" app/volumes/logs 2>/dev/null | tail -n 40 >> "$GITHUB_STEP_SUMMARY" || true
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
