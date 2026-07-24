@@ -168,8 +168,8 @@ jobs:
           # App-level budgets (must stay under job timeout-minutes: 45)
           TASK_TIMEOUT_SECONDS: "1500"
           PER_GAME_TIMEOUT_SECONDS: "300"
-          PER_GAME_MAX_CHECKOUT_ATTEMPTS: "2"
-          CHECKOUT_SCAN_TIMEOUT_MS: "3000"
+          PER_GAME_MAX_CHECKOUT_ATTEMPTS: "3"
+          CHECKOUT_SCAN_TIMEOUT_MS: "6000"
           FINALIZE_TIMEOUT_SECONDS: "90"
           CART_CHECKOUT_MAX_ATTEMPTS: "2"
         run: |

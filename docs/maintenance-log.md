@@ -792,3 +792,21 @@
   - 点击失败输出 `place_order_unclickable` 并停止空转；购物车结账递归改为有限次。
   - 每游戏输出 `game_result` 结构化日志；CI 收紧 captcha/task 预算并增强 failure diagnostics。
   - 静态验证：`py_compile` + `ast.parse` 通过。
+
+### 2026-07-24 Foretales 结账按钮定位失败修复
+
+- 现象：
+  - Actions run `30090564858` 中 `Foretales` 点击 `Get` 后截图已出现 `Add to library` 结账弹层，但代码持续 `Primary buttons not found` / `checkout_unready`。
+- 根因判断：
+  - 免费领取结账常以商品页内嵌 purchase iframe/modal 呈现，旧扫描优先依赖 frame URL 关键字，且按钮匹配策略过窄。
+  - 扫描超时偏短时，未优先探测 `webPurchaseContainer` iframe。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `app/settings.py`
+  - `.github/workflows/epic-gamer.yml`
+  - `.env.example`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 优先扫描 purchase iframe selectors，扩展 `Add to library` 多策略定位（role/regex/xpath）。
+  - 点击 Get 后增加 `_wait_for_checkout_surface`；instant checkout 先做直接扫描。
+  - `CHECKOUT_SCAN_TIMEOUT_MS` 默认提升到 6000，单游戏结账尝试提升到 3。
