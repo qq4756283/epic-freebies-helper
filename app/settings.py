@@ -92,6 +92,7 @@ class EpicSettings(AgentConfig):
 
     ENABLE_APSCHEDULER: bool = Field(default=True)
     TASK_TIMEOUT_SECONDS: int = Field(default=900)
+    AUTH_ATTEMPT_TIMEOUT_SECONDS: int = Field(default=240, ge=60, le=600)
     AUTH_MAX_ATTEMPTS: int = Field(default=5, ge=3, le=8)
     REDIS_URL: str = Field(default="redis://redis:6379/0")
     CELERY_WORKER_CONCURRENCY: int = Field(default=1)
