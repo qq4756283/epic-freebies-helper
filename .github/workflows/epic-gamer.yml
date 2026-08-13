@@ -83,6 +83,7 @@ jobs:
           DISABLE_BEZIER_TRAJECTORY: false
           # 在 Actions 中我们依靠 GitHub 的 cron 触发，所以关闭内部调度器
           ENABLE_APSCHEDULER: false
+          AUTH_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.AUTH_ATTEMPT_TIMEOUT_SECONDS || '240' }}
           MPLBACKEND: Agg
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: app
