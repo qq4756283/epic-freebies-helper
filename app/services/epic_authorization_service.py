@@ -831,8 +831,18 @@ class EpicAuthorization:
                 return True
 
             try:
-                if await self._login():
+                if await asyncio.wait_for(
+                    self._login(), timeout=settings.AUTH_ATTEMPT_TIMEOUT_SECONDS
+                ):
                     return True
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Authentication attempt {}/{} exceeded the {}s hard timeout; "
+                    "resetting browser state",
+                    attempt,
+                    max_attempts,
+                    settings.AUTH_ATTEMPT_TIMEOUT_SECONDS,
+                )
             except EpicManualActionRequiredError:
                 raise
             except EpicAuthenticationFatalError:
