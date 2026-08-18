@@ -1399,3 +1399,16 @@
   - outline 本地 solver 以当前识别到的 `user_prompt` 为准，避免把视觉上是 fit puzzle、但 payload/目录归类异常的题误当 outline 题处理。
   - 当 outline 本地匹配不够自信时，把检测到的候选 outline page 坐标写入 GLM 拖拽提示，要求模型只在这些候选中心里选择 `end_point`。
   - Actions 默认传入 `AUTH_MAX_ATTEMPTS=8`，让登录 hCaptcha 在 60 分钟 job timeout 内获得更多独立认证机会；仍可用 repository variable 覆盖。
+
+### 2026-08-19 限制 Actions apt 安装阶段卡死
+
+- 现象：
+  - Actions run `32165719732` 触发后长期停在 `Install system dependencies`，未进入 Python 依赖安装或领取脚本。
+- 根因判断：
+  - GitHub hosted runner 的 Ubuntu apt 镜像/网络偶发卡顿；该步骤没有独立 timeout，可能占用整轮 job 时间并掩盖真正的领取验证结果。
+- 改动文件：
+  - `.github/workflows/epic-gamer.yml`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 为 `Install system dependencies` 增加 `timeout-minutes: 5`。
+  - 为 `apt-get update/install` 增加 `Acquire::Retries=3` 与 `Acquire::http::Timeout=30`，让镜像卡顿快速失败或重试，不再拖满整轮 Actions。
