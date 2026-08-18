@@ -1309,3 +1309,18 @@
 - 处理结果：
   - 引入 `post_security_submissions`：每次结账安全校验成功清回 checkout 状态后，重新授予最多 2 轮的额外提交配额（总量上限 8 次、受总超时约束），让 "Add to library" 能在校验通过后再次被点击以完成领取；无安全校验时行为与原逻辑完全一致。
   - 已通过 `python -m py_compile` 语法校验；等待重新触发 GitHub Actions 实测验证。
+
+
+### 2026-08-18 修复 agnes 中转的 challenge 分类模型无法通过 ChallengeRouterResult 校验
+
+- 现象：
+  - 用 GLM 兼容补丁接 agnes 中转（`GLM_BASE_URL=https://api.agnes-ai.cn/v1`、`GLM_MODEL=agnes-2.5-flash`）时，登录 hCaptcha 反复出现 `2 validation errors for ChallengeRouterResult`（缺失 `challenge_prompt` 与 `challenge_type`），重试 3 次后登录失败，Action run `32130487742` 以失败结束。
+- 根因判断：
+  - 直接复现 agnes-2.5-flash 的真实请求，发现该模型按 challenge_router.md 的提示只会返回 `{"expected_output_type": "image_label_single_select"}`，既不会用 `challenge_type` 作为键名，也不输出 `challenge_prompt`；而 `llm_adapter.py` 的 `_coerce_payload_for_schema` 只认 `challenge_type/request_type/task_type/type` 等键，识别不到 `expected_output_type`，导致 `ChallengeRouterResult` 校验失败。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `expected_output_type`（及 `challengeType`/`Challenge Type`）为 `challenge_type` 的合法别名，在 `_coerce_payload_for_schema` 统一兜底抽取，任何命中都补齐 `challenge_prompt` 后完成 `ChallengeRouterResult` 校验。
+  - 在 `_build_messages` 针对含 `challenge_type`+`challenge_prompt` 的 schema 追加 `GLM_ROUTER_JSON_INSTRUCTION` 提示，显式要求模型只输出这两个键，减少非标准键名输出。
+  - 已用 agnes 真实返回的多种格式做回归：`expected_output_type`、标准 `challenge_type`、纯类型文本、Markdown JSON 块均能正确解析并校验通过；`python -m py_compile` 通过。

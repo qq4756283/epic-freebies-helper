@@ -24,6 +24,16 @@ CHALLENGE_PROMPT_ALIASES = (
     "requester_question",
 )
 
+CHALLENGE_TYPE_ALIASES = (
+    "challenge_type",
+    "request_type",
+    "task_type",
+    "type",
+    "expected_output_type",
+    "challengeType",
+    "Challenge Type",
+)
+
 POINTS_ALIASES = ("points", "point", "coordinates", "Coordinates")
 
 PATHS_ALIASES = ("paths", "path", "coordinates", "Coordinates")
@@ -82,6 +92,14 @@ GLM_MULTI_TARGET_INSTRUCTION = (
     "For multi-target selection challenges, inspect every candidate and return every matching "
     "target, not only the first one. Use the center of each selected object and preserve a "
     "stable visual reading order."
+)
+
+GLM_ROUTER_JSON_INSTRUCTION = (
+    "For this challenge-classification task, respond ONLY with a JSON object that contains "
+    "exactly these two keys: challenge_type and challenge_prompt. challenge_type must be one of "
+    "image_label_single_select, image_label_multi_select, image_drag_single, image_drag_multi. "
+    "challenge_prompt is the challenge question text from the image, or an empty string if none "
+    "is visible. Do not use any other key names such as answer or expected_output_type."
 )
 
 
@@ -221,6 +239,16 @@ def _extract_challenge_type(text: str) -> str | None:
     if stripped in KNOWN_CHALLENGE_TYPES:
         return stripped
     return None
+
+
+def _payload_challenge_type(payload: dict[str, Any]) -> str | None:
+    for alias in CHALLENGE_TYPE_ALIASES:
+        value = payload.get(alias)
+        if isinstance(value, str):
+            extracted = _extract_challenge_type(value)
+            if extracted:
+                return extracted
+    return _extract_challenge_type(str(payload.get("answer") or ""))
 
 
 def _schema_enum_values(schema: Any, field_name: str) -> set[str]:
@@ -916,10 +944,8 @@ def _coerce_payload_for_schema(payload: dict[str, Any], schema: Any, text: str) 
     if challenge_type_field:
         challenge_type = (
             payload.get(challenge_type_field)
-            or payload.get("challenge_type")
-            or payload.get("request_type")
+            or _payload_challenge_type(payload)
             or _extract_challenge_type(text)
-            or _extract_challenge_type(str(payload.get("answer") or ""))
         )
         challenge_type = _coerce_challenge_type_for_schema(
             challenge_type, schema, challenge_type_field
@@ -1095,6 +1121,8 @@ class _GLMAsyncModels:
                 system_messages.append(GLM_COMPLEX_DRAG_INSTRUCTION)
             elif "points" in response_fields:
                 system_messages.append(GLM_MULTI_TARGET_INSTRUCTION)
+            elif "challenge_type" in response_fields and "challenge_prompt" in response_fields:
+                system_messages.append(GLM_ROUTER_JSON_INSTRUCTION)
 
         if system_messages:
             messages.insert(0, {"role": "system", "content": "\n\n".join(system_messages)})
