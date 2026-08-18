@@ -292,16 +292,23 @@ def _correct_drag_source_points(
     return paths
 
 
+def _contour_center(contour: np.ndarray) -> tuple[float, float] | None:
+    moments = cv2.moments(contour)
+    if not moments["m00"]:
+        return None
+    return moments["m10"] / moments["m00"], moments["m01"] / moments["m00"]
+
+
 def _extract_outline_targets(
     challenge_screenshot: Path,
 ) -> list[tuple[np.ndarray, tuple[float, float]]]:
     image = cv2.imread(str(challenge_screenshot))
-    canvas_origin = _detect_task_canvas_origin(challenge_screenshot)
-    if image is None or canvas_origin is None:
+    canvas_bounds = _detect_task_canvas_bounds(challenge_screenshot)
+    if image is None or canvas_bounds is None:
         return []
 
-    origin_x, origin_y = canvas_origin
-    task_canvas = image[origin_y:, origin_x:]
+    origin_x, origin_y, canvas_x_max, canvas_y_max = canvas_bounds
+    task_canvas = image[origin_y : canvas_y_max + 1, origin_x : canvas_x_max + 1]
     hsv = cv2.cvtColor(task_canvas, cv2.COLOR_BGR2HSV)
     outline_mask = ((hsv[:, :, 1] < 100) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
     outline_mask[:, int(task_canvas.shape[1] * 0.68) :] = 0
@@ -321,10 +328,33 @@ def _extract_outline_targets(
         if not contours:
             continue
         contour = max(contours, key=cv2.contourArea)
-        moments = cv2.moments(contour)
-        if not moments["m00"]:
+        center = _contour_center(contour)
+        if center is None:
             continue
-        center = (moments["m10"] / moments["m00"], moments["m01"] / moments["m00"])
+        targets.append((contour, center))
+
+    if len(targets) >= 2:
+        return targets
+
+    edges = cv2.Canny(cv2.cvtColor(task_canvas, cv2.COLOR_BGR2GRAY), 50, 120)
+    edges[:, int(task_canvas.shape[1] * 0.68) :] = 0
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        if not (400 <= area <= 6000 and width >= 35 and height >= 35):
+            continue
+        if x >= task_canvas.shape[1] * 0.68 or y >= task_canvas.shape[0] * 0.88:
+            continue
+        center = _contour_center(contour)
+        if center is None:
+            center = (x + width / 2, y + height / 2)
+        if any(
+            (center[0] - existing[1][0]) ** 2 + (center[1] - existing[1][1]) ** 2 < 30**2
+            for existing in targets
+        ):
+            continue
         targets.append((contour, center))
 
     return targets
@@ -343,7 +373,11 @@ def _decode_entity_contour(content: bytes) -> np.ndarray | None:
 
 
 def _match_outline_contours(
-    sources: list[np.ndarray], targets: list[tuple[np.ndarray, tuple[float, float]]]
+    sources: list[np.ndarray],
+    targets: list[tuple[np.ndarray, tuple[float, float]]],
+    *,
+    max_score: float = 0.16,
+    min_margin: float = 0.0,
 ) -> tuple[list[int], list[float]] | None:
     if not sources or len(targets) < len(sources):
         return None
@@ -352,13 +386,20 @@ def _match_outline_contours(
         [cv2.matchShapes(source, target[0], cv2.CONTOURS_MATCH_I1, 0) for target in targets]
         for source in sources
     ]
-    assignments = itertools.permutations(range(len(targets)), len(sources))
-    best = min(
-        assignments, key=lambda item: sum(scores[i][target] for i, target in enumerate(item))
+    ranked = sorted(
+        itertools.permutations(range(len(targets)), len(sources)),
+        key=lambda item: sum(scores[i][target] for i, target in enumerate(item)),
     )
+    best = ranked[0]
     assigned_scores = [scores[index][target] for index, target in enumerate(best)]
     if max(assigned_scores) > 0.16:
-        return None
+        if max(assigned_scores) > max_score:
+            return None
+        if min_margin and len(ranked) > 1:
+            best_total = sum(assigned_scores)
+            runner_up_total = sum(scores[i][target] for i, target in enumerate(ranked[1]))
+            if runner_up_total - best_total < min_margin:
+                return None
     return list(best), assigned_scores
 
 
@@ -526,6 +567,7 @@ async def _resolve_outline_paths(
     crumb_id: int,
     challenge_screenshot: Path,
     challenge_bbox: dict[str, float] | None,
+    question_hint: str = "",
 ) -> list[SpatialPath] | None:
     tasklist = getattr(captcha_payload, "tasklist", None) or []
     if crumb_id < 0 or crumb_id >= len(tasklist):
@@ -534,9 +576,10 @@ async def _resolve_outline_paths(
     if len(entities) < 2:
         return None
 
-    question = ""
-    with suppress(Exception):
-        question = captcha_payload.get_requester_question().lower()
+    question = question_hint.lower()
+    if not question:
+        with suppress(Exception):
+            question = captcha_payload.get_requester_question().lower()
     if "outline" not in question:
         return None
 
@@ -564,7 +607,9 @@ async def _resolve_outline_paths(
 
     if any(contour is None for contour in source_contours):
         return None
-    matched = _match_outline_contours(source_contours, targets)
+    matched = _match_outline_contours(
+        source_contours, targets, max_score=0.65, min_margin=0.1
+    )
     if matched is None:
         logger.warning("hCaptcha outline topology match was not confident; falling back to LLM")
         return None
@@ -599,7 +644,12 @@ async def _resolve_outline_paths(
     return paths
 
 
-def _build_drag_prompt(user_prompt: str, *, source_points: list[tuple[int, int]]) -> str:
+def _build_drag_prompt(
+    user_prompt: str,
+    *,
+    source_points: list[tuple[int, int]],
+    target_points: list[tuple[int, int]] | None = None,
+) -> str:
     details = (
         f"Authoritative draggable centers from the challenge payload: {source_points}. "
         "Use these exact start_point values and reason only about each end_point. "
@@ -610,6 +660,13 @@ def _build_drag_prompt(user_prompt: str, *, source_points: list[tuple[int, int]]
         "already complete printed object, choose the most plausible negative-space center where "
         "the movable piece would complete the scene. Ignore the translucent Move overlay."
     )
+    if target_points:
+        details += (
+            f" Detected candidate outline centers: {target_points}. For outline-matching "
+            "challenges, every end_point must be one of these centers; choose the candidate whose "
+            "silhouette matches each draggable item, and do not use the center of the visible "
+            "draggable item or an unrelated background shape."
+        )
     if _is_line_completion_question(user_prompt):
         details += (
             " For numbered line completion, locate fixed segments 3 and 5 and the two exposed "
@@ -770,6 +827,7 @@ def apply_hcaptcha_drag_patch() -> None:
                     crumb_id=cid,
                     challenge_screenshot=raw,
                     challenge_bbox=challenge_bbox,
+                    question_hint=user_prompt,
                 )
             if paths is None:
                 source_points = _payload_source_points(
@@ -778,11 +836,18 @@ def apply_hcaptcha_drag_patch() -> None:
                     challenge_screenshot=raw,
                     challenge_bbox=challenge_bbox,
                 )
+                target_points = []
+                if "outline" in user_prompt.lower():
+                    target_points = _map_canvas_points_to_page(
+                        [target[1] for target in _extract_outline_targets(raw)],
+                        challenge_screenshot=raw,
+                        challenge_bbox=challenge_bbox,
+                    )
                 response = await self._spatial_path_reasoner(
                     challenge_screenshot=raw,
                     grid_divisions=projection,
                     auxiliary_information=_build_drag_prompt(
-                        user_prompt, source_points=source_points
+                        user_prompt, source_points=source_points, target_points=target_points
                     ),
                 )
                 logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')

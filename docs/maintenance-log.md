@@ -1381,3 +1381,21 @@
   - 引入更宽松的 task canvas bounds 检测，并继续复用原有拖拽源点校正、outline/line 本地求解与 GLM 拖拽提示，降低浅色 outline 题漏检概率。
   - 为点选 challenge 增加页面 challenge bounds / 可点击网格 bounds 提示与返回点校验，越界答案会被拒绝并触发重试。
   - 登录流程不再用 240 秒外层 `asyncio.wait_for` 强制切断 `_login()`；仍由每个内部等待、验证码信号等待以及 GitHub Actions job timeout 控制总时长，避免把正在推进的 hCaptcha 流程提前清空。
+
+### 2026-08-19 收紧 outline 拖拽题本地候选与模型提示
+
+- 现象：
+  - Actions run `32158952077` 不再被认证尝试级硬超时切断，但仍在登录 hCaptcha 阶段失败；日志显示多轮 `Drag the animal into its matching outline` 和 `Please drag the icon on the bottom to the place where it fits` 返回 `signal=failure`。
+  - artifact 中 GLM 有时会把非目标背景图案、可见拖拽项或错误 outline 当作 `end_point`，导致反复重试直至认证失败。
+- 根因判断：
+  - outline 本地匹配只使用低饱和亮色 mask，遇到浅色纹理背景会把大块背景合并，无法提取独立 outline 候选。
+  - 对低置信 outline 本地匹配完全回退给模型时，prompt 没有限定可选 outline 中心，模型仍需在复杂背景上自行发现候选。
+- 改动文件：
+  - `.github/workflows/epic-gamer.yml`
+  - `app/extensions/hcaptcha_adapter.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - outline 提取在普通 mask 无候选时回退到 Canny edge 候选，并对宽松匹配加入第二名差距保护；不够自信时继续交给模型。
+  - outline 本地 solver 以当前识别到的 `user_prompt` 为准，避免把视觉上是 fit puzzle、但 payload/目录归类异常的题误当 outline 题处理。
+  - 当 outline 本地匹配不够自信时，把检测到的候选 outline page 坐标写入 GLM 拖拽提示，要求模型只在这些候选中心里选择 `end_point`。
+  - Actions 默认传入 `AUTH_MAX_ATTEMPTS=8`，让登录 hCaptcha 在 60 分钟 job timeout 内获得更多独立认证机会；仍可用 repository variable 覆盖。
