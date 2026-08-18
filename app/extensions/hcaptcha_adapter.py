@@ -30,18 +30,18 @@ def _longest_contiguous_run(values: np.ndarray) -> list[int]:
     return max(runs, key=len, default=[])
 
 
-def _detect_task_canvas_origin(challenge_screenshot: Path) -> tuple[int, int] | None:
+def _detect_task_canvas_bounds(challenge_screenshot: Path) -> tuple[int, int, int, int] | None:
     image = cv2.imread(str(challenge_screenshot))
     if image is None:
         return None
 
     height, width = image.shape[:2]
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    colored_pixels = (hsv[:, :, 1] > 30) & (hsv[:, :, 2] > 20)
+    task_pixels = (hsv[:, :, 1] > 10) | (hsv[:, :, 2] < 235)
 
     # The prompt header occupies the top of the challenge. The task canvas is the longest
     # colored run below it, regardless of whether hCaptcha renders the 320px or 330px layout.
-    row_counts = colored_pixels.sum(axis=1)
+    row_counts = task_pixels.sum(axis=1)
     row_indexes = np.flatnonzero(
         (row_counts > width * 0.35) & (np.arange(height) >= int(height * 0.23))
     )
@@ -49,12 +49,160 @@ def _detect_task_canvas_origin(challenge_screenshot: Path) -> tuple[int, int] | 
     if len(task_rows) < height * 0.45:
         return None
 
-    task_mask = colored_pixels[task_rows[0] : task_rows[-1] + 1]
-    column_indexes = np.flatnonzero(task_mask.sum(axis=0) > len(task_rows) * 0.05)
+    task_mask = task_pixels[task_rows[0] : task_rows[-1] + 1]
+    column_indexes = np.flatnonzero(task_mask.sum(axis=0) > len(task_rows) * 0.2)
     if not len(column_indexes):
         return None
 
-    return int(column_indexes.min()), task_rows[0]
+    return (int(column_indexes.min()), task_rows[0], int(column_indexes.max()), task_rows[-1])
+
+
+def _detect_task_canvas_origin(challenge_screenshot: Path) -> tuple[int, int] | None:
+    bounds = _detect_task_canvas_bounds(challenge_screenshot)
+    return bounds[:2] if bounds is not None else None
+
+
+def _detect_clickable_grid_bounds(challenge_screenshot: Path) -> tuple[int, int, int, int] | None:
+    image = cv2.imread(str(challenge_screenshot))
+    task_bounds = _detect_task_canvas_bounds(challenge_screenshot)
+    if image is None or task_bounds is None:
+        return None
+
+    task_x_min, task_y_min, task_x_max, task_y_max = task_bounds
+    task_height = task_y_max - task_y_min + 1
+    task_width = task_x_max - task_x_min + 1
+    if task_width < task_height * 1.25:
+        return None
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, dark = cv2.threshold(gray, 55, 255, cv2.THRESH_BINARY_INV)
+    dark = cv2.morphologyEx(
+        dark, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    )
+    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    badge_centers: list[tuple[float, float]] = []
+    image_height, image_width = image.shape[:2]
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        if not (
+            task_y_min <= y <= task_y_max
+            and image_width * 0.07 <= width <= image_width * 0.16
+            and image_height * 0.04 <= height <= image_height * 0.11
+            and 1.25 <= width / max(height, 1) <= 2.2
+            and area >= width * height * 0.45
+        ):
+            continue
+        badge_centers.append((x + width / 2, y + height / 2))
+
+    best_group: list[tuple[float, float]] = []
+    x_tolerance = image_width * 0.04
+    for center in badge_centers:
+        group = [item for item in badge_centers if abs(item[0] - center[0]) <= x_tolerance]
+        if len(group) > len(best_group):
+            best_group = group
+
+    if len(best_group) < 3:
+        return None
+    badge_y_values = [center[1] for center in best_group]
+    if max(badge_y_values) - min(badge_y_values) < task_height * 0.45:
+        return None
+
+    reference_x = sum(center[0] for center in best_group) / len(best_group)
+    task_midpoint = (task_x_min + task_x_max) / 2
+    if reference_x < task_midpoint:
+        return task_x_max - task_height + 1, task_y_min, task_x_max, task_y_max
+    return task_x_min, task_y_min, task_x_min + task_height - 1, task_y_max
+
+
+def _map_image_bounds_to_page(
+    image_bounds: tuple[int, int, int, int],
+    *,
+    challenge_screenshot: Path,
+    challenge_bbox: dict[str, float],
+) -> tuple[float, float, float, float] | None:
+    image = cv2.imread(str(challenge_screenshot))
+    if image is None:
+        return None
+
+    image_height, image_width = image.shape[:2]
+    x_min, y_min, x_max, y_max = image_bounds
+    scale_x = float(challenge_bbox["width"]) / image_width
+    scale_y = float(challenge_bbox["height"]) / image_height
+    return (
+        float(challenge_bbox["x"]) + x_min * scale_x,
+        float(challenge_bbox["y"]) + y_min * scale_y,
+        float(challenge_bbox["x"]) + x_max * scale_x,
+        float(challenge_bbox["y"]) + y_max * scale_y,
+    )
+
+
+def _point_inside_bounds(
+    point: tuple[float, float], bounds: tuple[float, float, float, float]
+) -> bool:
+    x, y = point
+    x_min, y_min, x_max, y_max = bounds
+    return x_min <= x <= x_max and y_min <= y <= y_max
+
+
+def _point_answer_validation_error(
+    points: list[Any],
+    *,
+    challenge_bbox: dict[str, float] | None,
+    clickable_bounds: tuple[float, float, float, float] | None,
+) -> str | None:
+    if not points:
+        return "model returned no click points"
+    if challenge_bbox is None:
+        return None
+
+    challenge_bounds = (
+        float(challenge_bbox["x"]),
+        float(challenge_bbox["y"]),
+        float(challenge_bbox["x"]) + float(challenge_bbox["width"]),
+        float(challenge_bbox["y"]) + float(challenge_bbox["height"]),
+    )
+    for point in points:
+        coordinates = float(point.x), float(point.y)
+        if not _point_inside_bounds(coordinates, challenge_bounds):
+            return f"point {coordinates} is outside challenge bounds {challenge_bounds}"
+        if clickable_bounds is not None and not _point_inside_bounds(coordinates, clickable_bounds):
+            return f"point {coordinates} is outside clickable grid {clickable_bounds}"
+    return None
+
+
+def _build_point_prompt(
+    user_prompt: str,
+    *,
+    challenge_bbox: dict[str, float] | None,
+    clickable_bounds: tuple[float, float, float, float] | None,
+) -> str:
+    if clickable_bounds is not None:
+        x_min, y_min, x_max, y_max = clickable_bounds
+        constraint = (
+            "The clickable tile grid is within page coordinates "
+            f"x={x_min:.0f}..{x_max:.0f}, y={y_min:.0f}..{y_max:.0f}. "
+            "Every returned point must be inside this grid. Repeated count badges and example "
+            "animals outside the grid are references only, regardless of which side they occupy."
+        )
+    elif challenge_bbox is not None:
+        x_min = float(challenge_bbox["x"])
+        y_min = float(challenge_bbox["y"])
+        x_max = x_min + float(challenge_bbox["width"])
+        y_max = y_min + float(challenge_bbox["height"])
+        constraint = (
+            "Every returned point must be inside the visible challenge bounds "
+            f"x={x_min:.0f}..{x_max:.0f}, y={y_min:.0f}..{y_max:.0f}."
+        )
+    else:
+        return user_prompt
+    return f"{user_prompt}\n\n{constraint}"
+
+
+def _is_count_selection_question(question: str) -> bool:
+    normalized = question.lower()
+    return "animal" in normalized and "count" in normalized
 
 
 def _entity_centers(captcha_payload: Any, crumb_id: int) -> list[tuple[int, int]]:
@@ -532,6 +680,69 @@ def _apply_empty_checkcaptcha_patch() -> None:
 
 def apply_hcaptcha_drag_patch() -> None:
     _apply_empty_checkcaptcha_patch()
+
+    if not getattr(RoboticArm.challenge_image_label_select, "_epic_point_bounds_patch", False):
+
+        async def patched_challenge_image_label_select(self: RoboticArm, job_type: Any):
+            frame_challenge = await self.get_challenge_frame_locator()
+            crumb_count = await self.check_crumb_count()
+            cache_key = self.config.create_cache_key(self.captcha_payload)
+
+            for cid in range(crumb_count):
+                await self.page.wait_for_timeout(self.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS)
+                raw, projection = await self._capture_spatial_mapping(
+                    frame_challenge, cache_key, cid
+                )
+                challenge_bbox = await frame_challenge.locator(
+                    "//div[@class='challenge-view']"
+                ).bounding_box()
+                base_prompt = self._match_user_prompt(job_type)
+                image_grid_bounds = (
+                    _detect_clickable_grid_bounds(raw)
+                    if _is_count_selection_question(base_prompt)
+                    else None
+                )
+                clickable_bounds = None
+                if image_grid_bounds is not None and challenge_bbox is not None:
+                    clickable_bounds = _map_image_bounds_to_page(
+                        image_grid_bounds, challenge_screenshot=raw, challenge_bbox=challenge_bbox
+                    )
+
+                user_prompt = _build_point_prompt(
+                    base_prompt, challenge_bbox=challenge_bbox, clickable_bounds=clickable_bounds
+                )
+                response = await self._spatial_point_reasoner(
+                    challenge_screenshot=raw,
+                    grid_divisions=projection,
+                    auxiliary_information=user_prompt,
+                )
+                logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')
+
+                validation_error = _point_answer_validation_error(
+                    response.points,
+                    challenge_bbox=challenge_bbox,
+                    clickable_bounds=clickable_bounds,
+                )
+                if validation_error is not None:
+                    logger.warning(
+                        "Rejected unsafe hCaptcha point answer | reason={}", validation_error
+                    )
+                    raise ValueError(f"Unsafe hCaptcha point answer: {validation_error}")
+
+                self._spatial_point_reasoner.cache_response(
+                    path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
+                )
+                for point in response.points:
+                    await self.page.mouse.click(point.x, point.y, delay=180)
+                    await self.page.wait_for_timeout(500)
+
+                with suppress(PlaywrightTimeoutError):
+                    submit_btn = frame_challenge.locator("//div[@class='button-submit button']")
+                    await self.click_by_mouse(submit_btn)
+
+        patched_challenge_image_label_select._epic_point_bounds_patch = True
+        RoboticArm.challenge_image_label_select = patched_challenge_image_label_select
+
     if getattr(RoboticArm.challenge_image_drag_drop, "_epic_drag_source_patch", False):
         return
 
@@ -595,4 +806,4 @@ def apply_hcaptcha_drag_patch() -> None:
 
     patched_challenge_image_drag_drop._epic_drag_source_patch = True
     RoboticArm.challenge_image_drag_drop = patched_challenge_image_drag_drop
-    logger.info("hCaptcha local drag solvers and response patches loaded")
+    logger.info("hCaptcha local solvers, point guards, and response patches loaded")

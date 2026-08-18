@@ -1363,3 +1363,21 @@
   - `docs/maintenance-log.md`
 - 处理结果：
   - 将 checkout security 消失但 `_observe_checkout_outcome` 暂未识别到 `claimed/checkout` 的两个分支从 `return False` 改为短暂等待并继续观察，让状态机继续捕捉后续恢复的 checkout、安全校验重入或 claimed 状态。
+
+### 2026-08-19 对齐上游登录 hCaptcha 长耗时与点位边界增强
+
+- 现象：
+  - Actions run `32156377573` 在登录阶段反复遇到 hCaptcha；部分拖拽 challenge 返回 `signal=failure`，且日志出现 `Could not locate hCaptcha drag canvas`。
+  - 同一轮登录中也出现过 `signal=success`，但页面仍未及时进入已登录状态；外层 `AUTH_ATTEMPT_TIMEOUT_SECONDS=240` 会把仍在进行中的验证码求解强行重置，导致重复从头登录。
+- 根因判断：
+  - 旧的画布定位只依赖较强色彩像素，遇到低饱和/浅色 outline 题时容易定位不到 task canvas，从而无法用 payload 的权威源点校正模型答案。
+  - 登录 hCaptcha 可能连续刷新并超过 240 秒；认证尝试级硬超时比 workflow/job 总超时更短，会中断仍可恢复的求解链路。
+  - 点选类 challenge 缺少可点击网格边界约束，模型有机会把参考图、计数徽标等非网格区域当作答案。
+- 改动文件：
+  - `app/extensions/hcaptcha_adapter.py`
+  - `app/services/epic_authorization_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 引入更宽松的 task canvas bounds 检测，并继续复用原有拖拽源点校正、outline/line 本地求解与 GLM 拖拽提示，降低浅色 outline 题漏检概率。
+  - 为点选 challenge 增加页面 challenge bounds / 可点击网格 bounds 提示与返回点校验，越界答案会被拒绝并触发重试。
+  - 登录流程不再用 240 秒外层 `asyncio.wait_for` 强制切断 `_login()`；仍由每个内部等待、验证码信号等待以及 GitHub Actions job timeout 控制总时长，避免把正在推进的 hCaptcha 流程提前清空。
