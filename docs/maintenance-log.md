@@ -1296,3 +1296,16 @@
   - 启用 Telegram 时直接生成“未确认领取”的限流通知摘要，不再执行封控后的订单历史核验，随后立即关闭浏览器。
   - 多账户中的封控账号单独计为 `rate-limited`，不计入领取成功，也不阻断其他账号；只有真实失败账号才让整个 Action 失败。
   - 绿色 Action 的最终摘要会优先识别限流日志并显示“正常结束但本次领取未成功”，不会进入普通成功领取提示。
+
+### 2026-08-18 修复结账安全校验通过后仍停在 "Add to library" 的领取失败
+
+- 现象：
+  - Actions run `31719277770` 领取 Caravan SandWitch 时，登录成功且已进入结账流程，但 Place Order / Add to library 的标准与 force 点击持续超时，仅 dom 点击能触发 checkout 安全校验；安全校验两次 `challenge_execution_timeout` 后清回 checkout 状态，随后日志输出 `Instant checkout ended without a confirmed claim state`，最终 reconciliation 未在页面或订单历史中确认领取，运行以 `Failed to confirm claim flow` 失败。
+- 根因判断：
+  - `_handle_instant_checkout` 的提交配额 `submission_attempt < 4` 为全程累计；安全校验出现前就把 4 次提交机会耗尽（标准/force 点击超时、dispatch/dom 无效果），因此安全校验通过、页面回到 "Add to library" 后，循环条件立即退出，没有再做一次真正提交来完成下单。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 引入 `post_security_submissions`：每次结账安全校验成功清回 checkout 状态后，重新授予最多 2 轮的额外提交配额（总量上限 8 次、受总超时约束），让 "Add to library" 能在校验通过后再次被点击以完成领取；无安全校验时行为与原逻辑完全一致。
+  - 已通过 `python -m py_compile` 语法校验；等待重新触发 GitHub Actions 实测验证。

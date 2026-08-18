@@ -1767,7 +1767,15 @@ class EpicGames:
                 return False
 
             submission_attempt = 0
-            while submission_attempt < 4 and remaining_ms(timeout_ms) > 0:
+            # A checkout security check can consume the submission budget while the
+            # order is still pending. After a security check clears back into a
+            # checkout state, grant a fresh (bounded) round of submissions so the
+            # "Add to library" button can finalize the order.
+            post_security_submissions = 0
+            while (
+                remaining_ms(timeout_ms) > 0
+                and submission_attempt < 4 + min(post_security_submissions, 2) * 2
+            ):
                 if state == "claimed":
                     logger.success(f"🎉 Instant checkout confirmed claim state - {url=}")
                     return True
@@ -1788,6 +1796,7 @@ class EpicGames:
                             return await finalize_unconfirmed()
                         state = "checkout"
                         payload = None
+                        post_security_submissions += 1
                         continue
                     if state != "checkout" or payload is None:
                         break
@@ -1825,6 +1834,8 @@ class EpicGames:
                         return True
                     state = "checkout" if outcome == "checkout" else outcome
                     payload = None
+                    if outcome == "checkout":
+                        post_security_submissions += 1
                     continue
 
                 logger.debug("No explicit checkout security check detected after Place Order")
