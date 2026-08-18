@@ -1338,3 +1338,16 @@
 - 处理结果：
   - 在 GLM 拖拽系统提示和 hCaptcha 辅助提示中明确：`end_point` 是图块放置完成后的中心，优先匹配 empty slot / hollow outline / cutout / negative space；除非相似对象本身就是空目标，否则不要把相似背景对象中心作为目标。
   - 同步要求忽略源图块外层的半透明 `Move` 浮层；若可见候选都是完整印刷图案，则选择最可能补全场景的负空间中心，减少模型把 UI 遮罩、源区域或相似背景图案当作匹配依据。
+
+### 2026-08-18 修复多轮 checkout security 重入时只剩 1 秒求解窗口
+
+- 现象：
+  - Actions run `32149608502` 已成功通过登录并进入 Caravan SandWitch 结账流程；checkout security 在多轮 hCaptcha 后曾清回 checkout，但页面很快再次显示安全校验，新的 solve loop 只拿到 `timeout=1.0s`，随后记录 `checkout_security_check_unresolved` 并以 `Failed to confirm claim flow` 失败。
+- 根因判断：
+  - `_handle_instant_checkout` 将外层 instant checkout 的剩余时间直接作为 `_resolve_checkout_security_check` 的 `max_wait_ms`。多轮安全校验耗尽全局 deadline 后，后续重入虽然还可继续求解，却只得到 1 秒级别的等待窗口。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `checkout_security_wait_ms()`，只要外层流程仍有剩余时间，checkout security solve 至少获得 180 秒窗口；避免刚通过一轮安全校验后立刻重入时因为 1 秒超时而提前放弃。
+  - 普通 checkout 点击、领取确认与 reconciliation 逻辑不变，额外时间只用于已经检测到的安全校验求解。

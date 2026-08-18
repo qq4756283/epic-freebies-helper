@@ -1740,6 +1740,12 @@ class EpicGames:
         def remaining_ms(limit_ms: int) -> int:
             return max(0, min(limit_ms, int((deadline - time.monotonic()) * 1000)))
 
+        def checkout_security_wait_ms() -> int:
+            remaining = remaining_ms(600000)
+            if remaining <= 0:
+                return 0
+            return max(remaining, 180000)
+
         async def finalize_unconfirmed() -> bool:
             if not allow_finalize:
                 return False
@@ -1755,7 +1761,7 @@ class EpicGames:
 
             if state == "security":
                 if not await self._resolve_checkout_security_check(
-                    page, agent, url, max_wait_ms=remaining_ms(600000)
+                    page, agent, url, max_wait_ms=checkout_security_wait_ms()
                 ):
                     return await finalize_unconfirmed()
                 state = "checkout"
@@ -1791,7 +1797,7 @@ class EpicGames:
                         return True
                     if state == "security":
                         if not await self._resolve_checkout_security_check(
-                            page, agent, url, max_wait_ms=remaining_ms(600000)
+                            page, agent, url, max_wait_ms=checkout_security_wait_ms()
                         ):
                             return await finalize_unconfirmed()
                         state = "checkout"
@@ -1818,7 +1824,7 @@ class EpicGames:
 
                 if await self._is_checkout_security_check_visible(page):
                     if not await self._resolve_checkout_security_check(
-                        page, agent, url, max_wait_ms=remaining_ms(600000)
+                        page, agent, url, max_wait_ms=checkout_security_wait_ms()
                     ):
                         return await finalize_unconfirmed()
                     outcome = await self._observe_checkout_outcome(
@@ -1860,7 +1866,7 @@ class EpicGames:
                     )
                     if challenge_detected and await self._is_checkout_security_check_visible(page):
                         if not await self._resolve_checkout_security_check(
-                            page, agent, url, max_wait_ms=remaining_ms(600000)
+                            page, agent, url, max_wait_ms=checkout_security_wait_ms()
                         ):
                             return await finalize_unconfirmed()
                     if challenge_detected:
