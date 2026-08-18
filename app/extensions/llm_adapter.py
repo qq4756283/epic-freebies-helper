@@ -84,8 +84,13 @@ GLM_COMPLEX_DRAG_INSTRUCTION = (
     "normally near the midpoint of the numbered 3 and 5 circles, adjusted so both exposed ends "
     "connect. Reject unrelated empty areas outside that corridor. Always use "
     "the center of the movable piece as start_point and the center of its intended outline or "
-    "gap as end_point. Output only the response schema fields challenge_prompt and paths; do not "
-    "use aliases such as answer or src."
+    "gap as end_point. For single-piece fit puzzles, the end_point is the final center of the "
+    "movable piece after it is placed into a matching negative space, cutout, or hollow outline; "
+    "do not choose the center of a similar-looking background object unless that object is itself "
+    "the empty destination. If every visible candidate is an already complete printed object, choose "
+    "the most plausible negative-space center where the movable piece would complete the scene. "
+    "Ignore the translucent Move overlay around the source. Output only the response schema fields "
+    "challenge_prompt and paths; do not use aliases such as answer or src."
 )
 
 GLM_MULTI_TARGET_INSTRUCTION = (

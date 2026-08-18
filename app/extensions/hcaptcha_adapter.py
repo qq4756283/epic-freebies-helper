@@ -454,7 +454,13 @@ async def _resolve_outline_paths(
 def _build_drag_prompt(user_prompt: str, *, source_points: list[tuple[int, int]]) -> str:
     details = (
         f"Authoritative draggable centers from the challenge payload: {source_points}. "
-        "Use these exact start_point values and reason only about each end_point."
+        "Use these exact start_point values and reason only about each end_point. "
+        "For generic fit puzzles, drag the piece to the center it will occupy after placement "
+        "inside the matching empty slot, hollow outline, cutout, or missing-space silhouette. "
+        "Do not use the center of a similar-looking printed/background object as the target "
+        "unless it is visibly the empty destination itself. If every visible candidate is an "
+        "already complete printed object, choose the most plausible negative-space center where "
+        "the movable piece would complete the scene. Ignore the translucent Move overlay."
     )
     if _is_line_completion_question(user_prompt):
         details += (

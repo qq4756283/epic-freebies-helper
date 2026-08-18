@@ -1324,3 +1324,17 @@
   - 新增 `expected_output_type`（及 `challengeType`/`Challenge Type`）为 `challenge_type` 的合法别名，在 `_coerce_payload_for_schema` 统一兜底抽取，任何命中都补齐 `challenge_prompt` 后完成 `ChallengeRouterResult` 校验。
   - 在 `_build_messages` 针对含 `challenge_type`+`challenge_prompt` 的 schema 追加 `GLM_ROUTER_JSON_INSTRUCTION` 提示，显式要求模型只输出这两个键，减少非标准键名输出。
   - 已用 agnes 真实返回的多种格式做回归：`expected_output_type`、标准 `challenge_type`、纯类型文本、Markdown JSON 块均能正确解析并校验通过；`python -m py_compile` 通过。
+
+### 2026-08-18 收紧 GLM 单块拖拽题目标点提示
+
+- 现象：
+  - Actions run `32140453697` 使用 `glm-4.6v` 后，结构化解析与视觉坐标能力均正常，但登录 hCaptcha 连续遇到 `image_drag_single` 时仍返回 `signal=failure`；日志显示模型能使用权威源点，却常把相似的背景图案中心当作 `end_point`。
+- 根因判断：
+  - 通用拖拽提示强调按形状、颜色、尺寸和方向匹配，容易诱导模型选择“相似可见对象”的中心；而单块 fit puzzle 需要的是拖拽图块最终放入空槽、缺口或中空轮廓后的中心点。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`
+  - `app/extensions/hcaptcha_adapter.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 在 GLM 拖拽系统提示和 hCaptcha 辅助提示中明确：`end_point` 是图块放置完成后的中心，优先匹配 empty slot / hollow outline / cutout / negative space；除非相似对象本身就是空目标，否则不要把相似背景对象中心作为目标。
+  - 同步要求忽略源图块外层的半透明 `Move` 浮层；若可见候选都是完整印刷图案，则选择最可能补全场景的负空间中心，减少模型把 UI 遮罩、源区域或相似背景图案当作匹配依据。
