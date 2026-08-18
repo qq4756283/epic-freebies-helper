@@ -1351,3 +1351,15 @@
 - 处理结果：
   - 新增 `checkout_security_wait_ms()`，只要外层流程仍有剩余时间，checkout security solve 至少获得 180 秒窗口；避免刚通过一轮安全校验后立刻重入时因为 1 秒超时而提前放弃。
   - 普通 checkout 点击、领取确认与 reconciliation 逻辑不变，额外时间只用于已经检测到的安全校验求解。
+
+### 2026-08-18 修复 checkout security 清除后的瞬态 pending 被当作失败
+
+- 现象：
+  - Actions run `32152841883` 中，checkout security 已获得完整求解窗口，并在一轮安全校验后不再触发 1 秒超时；但第三轮 hCaptcha 后安全校验消失，页面短时间内既未确认 `claimed` 也未稳定回到 checkout，代码记录 `Checkout security check cleared into an indeterminate state` 后立即放弃，最终 reconciliation 仍无法确认领取。
+- 根因判断：
+  - Epic checkout iframe 在 security iframe 消失后可能需要额外时间恢复按钮、跳转状态或订单确认状态；`_resolve_checkout_security_check` 将这个瞬态 pending 视作不可恢复失败，过早退出。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 将 checkout security 消失但 `_observe_checkout_outcome` 暂未识别到 `claimed/checkout` 的两个分支从 `return False` 改为短暂等待并继续观察，让状态机继续捕捉后续恢复的 checkout、安全校验重入或 claimed 状态。

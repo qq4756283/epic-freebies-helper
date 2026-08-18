@@ -1344,7 +1344,8 @@ class EpicGames:
                     "Checkout security check disappeared without a recoverable checkout state - {}",
                     url,
                 )
-                return False
+                await page.wait_for_timeout(2500)
+                continue
 
             elapsed_seconds = int(time.monotonic() - started_at)
             logger.info(
@@ -1406,7 +1407,8 @@ class EpicGames:
                 logger.warning(
                     "Checkout security check cleared into an indeterminate state - {}", url
                 )
-                return False
+                await page.wait_for_timeout(2500)
+                continue
 
             outcome = await self._observe_checkout_outcome(page, url, timeout_ms=10000)
             logger.debug(
