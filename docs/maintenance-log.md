@@ -1412,3 +1412,19 @@
 - 处理结果：
   - 为 `Install system dependencies` 增加 `timeout-minutes: 5`。
   - 为 `apt-get update/install` 增加 `Acquire::Retries=3` 与 `Acquire::http::Timeout=30`，让镜像卡顿快速失败或重试，不再拖满整轮 Actions。
+
+### 2026-08-21 会话持久化与定时补跑：消除每周登录 hCaptcha 的单点赌博
+
+- 现象：
+  - Scheduled run `32388390589` 在登录阶段连续失败：hCaptcha 求解多次超时（GLM 请求异常重试、challenge execution timeout、"Cannot find a valid challenge frame"），8 次认证尝试全部失败后抛出 `RuntimeError: Authentication failed, aborting this run`。
+  - 对比同日成功的 dispatch run `32339224095`，代码完全相同，差异仅在验证码求解是否侥幸通过；近期运行历史中定时任务连续两周失败。
+- 根因判断：
+  - 登录是唯一强依赖 AI 解 hCaptcha 的环节，而 GitHub Actions 每次运行都使用全新浏览器档案，成功登录后的会话从未被保留，导致每周定时运行都要重新赌一次验证码求解成功率。
+- 改动文件：
+  - `.github/workflows/epic-gamer.yml`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `Restore Epic browser session` / `Save Epic browser session` 两步，用 actions/cache 跨运行保存 `app/volumes/user_data` 浏览器档案（含登录会话）；会话仍有效时 `invoke()` 检测到已登录即直接跳过登录环节，不再触发 hCaptcha。
+  - save 步骤使用 `if: always()`：失败运行的档案不含登录态，仅等价于冷启动，不会造成退化；restore-keys 取最近一次保存的档案。
+  - schedule 由仅周四扩展为周四/周五/周六每日 UTC 15:20：单日登录失败时由次日运行自动弥补，无需人工修跑。
+  - 已知边界：会话过期后的第一次运行仍需一次成功登录重建档案；GLM 长时间不可用时单次运行仍可能失败，但会被后续补跑兜底。

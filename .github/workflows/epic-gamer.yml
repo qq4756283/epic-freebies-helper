@@ -3,9 +3,12 @@ name: Epic Awesome Gamer (Scheduled)
 on:
   workflow_dispatch: # 手动触发
   schedule:
-    # 每周四 UTC 15:20 运行一次（北京时间周四 23:20）
+    # Epic 周免在周四刷新；北京时间周四 23:20（UTC 15:20）为主运行，
     # 该时间点放在 Epic 周免刷新之后，避免过早触发。
+    # 周五/周六同一时间自动补跑：某次登录 hCaptcha 失败时由后续运行自愈。
     - cron: '20 15 * * 4'
+    - cron: '20 15 * * 5'
+    - cron: '20 15 * * 6'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -25,6 +28,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # 复用上次运行保存的浏览器配置文件（含 Epic 登录会话）：
+      # 会话仍有效时 invoke() 直接跳过登录，从根源上避开登录 hCaptcha 这一主要失败点。
+      # restore-keys 命中最近一次保存的档案；key 含 run_id 保证每次运行都会另存新档。
+      - name: Restore Epic browser session
+        uses: actions/cache/restore@v4
+        with:
+          path: app/volumes/user_data
+          key: epic-session-${{ github.run_id }}
+          restore-keys: |
+            epic-session-
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -92,6 +106,15 @@ jobs:
         run: |
           echo "🚀 启动定时领取任务（支持 Gemini/AiHubMix/GLM）..."
           xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run app/deploy.py
+
+      # 无论成功失败都回存浏览器配置文件：成功运行保存有效会话供下次复用；
+      # 失败运行的档案不含登录态，仅等价于冷启动，不会让下次运行退化。
+      - name: Save Epic browser session
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: app/volumes/user_data
+          key: epic-session-${{ github.run_id }}
 
       - name: Write success summary
         if: success()
