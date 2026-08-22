@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import unquote, urlsplit
 
@@ -17,6 +19,46 @@ _VIEWPORT = ViewportSize(width=1920, height=1080)
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
+
+# Written into the persistent profile after a confirmed login. Profiles restored
+# from cache without this marker never reached a verified session (cancelled or
+# crashed runs) and are wiped before launch instead of being trusted.
+PROFILE_HEALTH_MARKER = ".profile-ok"
+
+# Points at the profile directory of the backend that is currently launching so
+# downstream services can persist health markers without knowing the backend.
+ACTIVE_PROFILE_DIR_ENV = "EPIC_ACTIVE_PROFILE_DIR"
+
+
+def ensure_healthy_profile(profile_dir: Path) -> bool:
+    """Drop cached profiles that never reached a confirmed login.
+
+    Returns True when an unhealthy profile directory was cleared.
+    """
+    try:
+        if not profile_dir.exists() or not any(profile_dir.iterdir()):
+            return False
+        if profile_dir.joinpath(PROFILE_HEALTH_MARKER).is_file():
+            return False
+    except OSError as err:
+        logger.warning("Profile health check skipped | dir={} | error={!r}", profile_dir, err)
+        return False
+
+    logger.warning(
+        "Browser profile has no {} marker; clearing stale cache before launch | dir={}",
+        PROFILE_HEALTH_MARKER,
+        profile_dir,
+    )
+    shutil.rmtree(profile_dir, ignore_errors=True)
+    try:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as err:
+        logger.warning("Failed to recreate profile directory | error={!r}", err)
+    return True
+
+
+def _mark_active_profile_dir(profile_dir: Path) -> None:
+    os.environ[ACTIVE_PROFILE_DIR_ENV] = str(profile_dir)
 
 
 def resolve_headless_mode(value: bool | str | None = None) -> bool | str:
@@ -159,7 +201,10 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
             camoufox_headless = (
                 False if headless == "virtual" and os.getenv("DISPLAY") else headless
             )
-            camoufox = AsyncCamoufox(**_camoufox_launch_options(camoufox_headless, proxy))
+            camoufox_options = _camoufox_launch_options(camoufox_headless, proxy)
+            ensure_healthy_profile(Path(str(camoufox_options["user_data_dir"])))
+            _mark_active_profile_dir(Path(str(camoufox_options["user_data_dir"])))
+            camoufox = AsyncCamoufox(**camoufox_options)
             browser = await camoufox.__aenter__()
         except Exception as err:
             if backend == "camoufox" or not _is_camoufox_bootstrap_error(err):
@@ -194,8 +239,11 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
 
     try:
         async with async_playwright() as playwright:
+            playwright_options = _playwright_launch_options(headless, proxy, display=display)
+            ensure_healthy_profile(Path(str(playwright_options["user_data_dir"])))
+            _mark_active_profile_dir(Path(str(playwright_options["user_data_dir"])))
             browser = await playwright.firefox.launch_persistent_context(
-                **_playwright_launch_options(headless, proxy, display=display)
+                **playwright_options
             )
             logger.warning(
                 "Browser backend active | backend=playwright-firefox | "

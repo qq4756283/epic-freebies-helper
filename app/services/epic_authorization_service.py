@@ -10,6 +10,8 @@ import json
 import os
 import time
 from contextlib import suppress
+from datetime import datetime, timezone
+from pathlib import Path
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -21,6 +23,7 @@ from playwright.async_api import expect, Page, Response
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from extensions.hcaptcha_runtime import wait_for_challenge_signal
+from services.browser_context import ACTIVE_PROFILE_DIR_ENV, PROFILE_HEALTH_MARKER
 from services.epic_totp_service import redact_totp_inputs, submit_totp_challenge, totp_login_enabled
 from settings import SCREENSHOTS_DIR, settings
 
@@ -47,6 +50,34 @@ class EpicAuthorization:
         self._totp_attempts = 0
         self._invalid_totp_rejections = 0
         self._last_captcha_totp_refresh_at = 0.0
+        # Coarse failure category consumed by deploy/run-outcome reporting.
+        self.outcome_reason = "auth_failed_captcha"
+
+    def _mark_profile_healthy(self) -> None:
+        """Persist the profile-health marker for the backend currently in use."""
+        profile_dir = os.getenv(ACTIVE_PROFILE_DIR_ENV)
+        if not profile_dir:
+            logger.debug("No active profile directory recorded; skipping health marker")
+            return
+        try:
+            Path(profile_dir).joinpath(PROFILE_HEALTH_MARKER).write_text(
+                datetime.now(timezone.utc).isoformat(timespec="seconds"), encoding="utf-8"
+            )
+            logger.success("Browser profile marked healthy | dir={}", profile_dir)
+        except OSError as err:
+            logger.warning("Failed to write browser profile marker | error={!r}", err)
+
+    async def refresh_session_health(self) -> bool:
+        """Report whether the current browser session is authenticated on Epic.
+
+        Used by the keepalive entrypoint; also persists the profile-health marker
+        so cached profiles stay trusted across scheduled runs.
+        """
+        status = await self._get_login_status(timeout_ms=15000)
+        if status != "true" and not await self._has_account_session():
+            return False
+        self._mark_profile_healthy()
+        return True
 
     async def _on_response_anything(self, r: Response):
         if r.request.method != "POST" or "talon" in r.url:
@@ -824,19 +855,23 @@ class EpicAuthorization:
                     "Epic account requires a manual privacy-policy confirmation | current_url='{}'",
                     self.page.url,
                 )
+                self.outcome_reason = "manual_action_required"
                 return False
 
             if "true" == await self._get_login_status():
                 logger.success("Epic Games is already logged in")
+                self._mark_profile_healthy()
                 return True
 
             try:
                 if await self._login():
+                    self._mark_profile_healthy()
                     return True
             except EpicManualActionRequiredError:
                 raise
             except EpicAuthenticationFatalError:
                 logger.error("Authentication aborted because Epic 2FA is still enabled")
+                self.outcome_reason = "auth_failed_2fa"
                 return False
 
             if attempt < max_attempts:

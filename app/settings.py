@@ -94,6 +94,9 @@ class EpicSettings(AgentConfig):
     TASK_TIMEOUT_SECONDS: int = Field(default=900)
     AUTH_ATTEMPT_TIMEOUT_SECONDS: int = Field(default=240, ge=60, le=600)
     AUTH_MAX_ATTEMPTS: int = Field(default=5, ge=3, le=8)
+    # Extra browser launches allowed when the browser backend dies mid-run
+    # (e.g. Playwright driver crash). 0 keeps the legacy single-attempt behavior.
+    BROWSER_RUN_RESTARTS: int = Field(default=1, ge=0, le=3)
     REDIS_URL: str = Field(default="redis://redis:6379/0")
     CELERY_WORKER_CONCURRENCY: int = Field(default=1)
     CELERY_TASK_TIME_LIMIT: int = Field(default=1200)

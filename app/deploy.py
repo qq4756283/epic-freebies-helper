@@ -22,10 +22,19 @@ from loguru import logger
 from pytz import timezone
 
 from accounts import get_epic_accounts_raw, mask_email, parse_multi_accounts, swap_account
-from services.epic_authorization_service import EpicAuthorization
+from services.epic_authorization_service import (
+    EpicAuthorization,
+    EpicManualActionRequiredError,
+)
 from services.browser_context import open_browser_context, resolve_headless_mode
 from services.epic_collection_summary_service import collect_epic_games_with_summary
 from services.epic_games_service import EpicAgent, EpicFreeGameRateLimitError
+from services.run_outcome import (
+    OUTCOME_BROWSER_CRASHED_EXHAUSTED,
+    OUTCOME_MANUAL_ACTION_REQUIRED,
+    OUTCOME_RATE_LIMITED,
+    write_run_outcome,
+)
 from services.telegram_notification_service import (
     failure_summary_from_exception,
     send_collection_summary_to_telegram,
@@ -34,6 +43,11 @@ from services.telegram_notification_service import (
 from settings import LOG_DIR
 from settings import settings
 from utils import init_log
+
+try:  # playwright >= 1.45 exposes a dedicated closed-target error type.
+    from playwright.async_api import TargetClosedError as _TargetClosedError
+except ImportError:  # pragma: no cover - older playwright pins
+    _TargetClosedError = None
 
 # Initialize logging configuration for runtime, error, and serialization logs
 init_log(
@@ -45,6 +59,15 @@ init_log(
 # Default timezone for scheduling operations
 TIMEZONE = timezone("Asia/Shanghai")
 RATE_LIMITED_OUTCOME = "rate_limited"
+
+# Message markers of a dead browser backend; the Python side only ever sees the
+# connection-level symptom, never the driver-side stack trace.
+_BROWSER_CRASH_MARKERS = (
+    "connection closed while reading from the driver",
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "playwright connection closed",
+)
 
 
 def _is_free_game_rate_limit_error(err: Exception) -> bool:
@@ -58,6 +81,53 @@ def _is_free_game_rate_limit_error(err: Exception) -> bool:
         current = current.__cause__ or current.__context__
 
     return False
+
+
+def _is_browser_crash_error(err: BaseException) -> bool:
+    """Report whether the exception chain points at a dead browser/driver."""
+    current: BaseException | None = err
+    seen: set[int] = set()
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _TargetClosedError is not None and isinstance(current, _TargetClosedError):
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in _BROWSER_CRASH_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+
+    return False
+
+
+async def _execute_browser_tasks_with_restarts(headless: bool | str, *, collect_summary: bool):
+    """Run the browser flow, restarting when the backend dies mid-run.
+
+    Restarts reuse the same persistent profile, so an already-confirmed login is
+    kept and the retry resumes claiming instead of gambling on login hCaptcha.
+    """
+    attempts = 1 + max(0, int(getattr(settings, "BROWSER_RUN_RESTARTS", 1)))
+    last_error: BaseException | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await execute_browser_tasks(
+                headless=headless, collect_summary=collect_summary
+            )
+        except Exception as err:
+            last_error = err
+            if attempt >= attempts or not _is_browser_crash_error(err):
+                raise
+            logger.error(
+                "Browser backend died mid-run | attempt {}/{} | restarting with the same "
+                "profile | error={}",
+                attempt,
+                attempts,
+                str(err)[:200],
+            )
+            await asyncio.sleep(5)
+
+    raise last_error  # pragma: no cover - loop always returns or raises
 
 
 @logger.catch(reraise=True)
@@ -84,6 +154,7 @@ async def execute_browser_tasks(headless: bool | str = True, *, collect_summary:
         agent = EpicAuthorization(page)
         is_authenticated = await agent.invoke()
         if not is_authenticated:
+            write_run_outcome(agent.outcome_reason)
             raise RuntimeError("Authentication failed, aborting this run")
         logger.debug("Authentication completed")
 
@@ -93,9 +164,14 @@ async def execute_browser_tasks(headless: bool | str = True, *, collect_summary:
         agent = EpicAgent(game_page)
         if collect_summary:
             summary = await collect_epic_games_with_summary(agent)
+            write_run_outcome(
+                getattr(agent, "collection_outcome", "claimed_ok"),
+                detail="with Telegram summary",
+            )
         else:
             await agent.collect_epic_games()
             summary = None
+            write_run_outcome(getattr(agent, "collection_outcome", "claimed_ok"))
         logger.debug("Free games collection completed")
 
         # Cleanup browser resources
@@ -120,10 +196,16 @@ async def execute_browser_tasks_with_notification(
         logger.debug("Telegram notification is not configured; using standard collection flow")
 
     try:
-        summary = await execute_browser_tasks(
+        summary = await _execute_browser_tasks_with_restarts(
             headless=headless, collect_summary=notifications_enabled
         )
     except Exception as err:
+        if isinstance(err, EpicManualActionRequiredError):
+            write_run_outcome(OUTCOME_MANUAL_ACTION_REQUIRED, str(err)[:200])
+        elif _is_free_game_rate_limit_error(err):
+            write_run_outcome(OUTCOME_RATE_LIMITED)
+        elif _is_browser_crash_error(err):
+            write_run_outcome(OUTCOME_BROWSER_CRASHED_EXHAUSTED, str(err)[:200])
         if notifications_enabled:
             await send_collection_summary_to_telegram(
                 failure_summary_from_exception(err), account_label=account_label

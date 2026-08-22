@@ -1,0 +1,122 @@
+name: Epic Session Keepalive
+
+# 每周中段探活并刷新 Epic 登录会话：
+# - 会话仍有效 → 刷新 cookie 并回存档案，周四主跑直接跳过登录 hCaptcha。
+# - 会话已失效 → 清掉毒档案并留下 session_expired 结局记录，提前预警，
+#   让后续正式运行按冷启动走一次全新登录，而不是继承劣化缓存。
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周二 UTC 03:00（北京时间 11:00），与周四主跑错开约两天半
+    - cron: '0 3 * * 2'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.repository != 'Ronchy2000/epic-freebies-helper'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Restore Epic browser session
+        uses: actions/cache/restore@v4
+        with:
+          path: app/volumes/user_data
+          key: epic-session-${{ github.run_id }}
+          restore-keys: |
+            epic-session-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 xvfb libxml2-dev libxslt-dev
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Camoufox
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run camoufox fetch
+
+      - name: Install Playwright Firefox fallback
+        run: uv run playwright install firefox
+
+      - name: Probe Epic session health
+        env:
+          BROWSER_BACKEND: auto
+          HEADLESS: virtual
+          MPLBACKEND: Agg
+          PYTHONPATH: app
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          echo "🔎 探测 Epic 登录会话健康状态..."
+          xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run scripts/session_keepalive.py
+
+      - name: Write keepalive summary
+        if: always()
+        run: |
+          OUTCOME_FILE=app/volumes/runtime/run-outcome.json
+          OUTCOME=""
+          if [ -f "$OUTCOME_FILE" ]; then
+            OUTCOME=$(sed -n 's/.*"outcome"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OUTCOME_FILE" | head -n1)
+          fi
+          case "$OUTCOME" in
+            session_valid)
+              {
+                echo "## ✅ Epic 会话健康"
+                echo
+                echo "登录会话有效，浏览器档案已刷新回存。周四的定时领取将跳过登录环节，直接进入领奖流程。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            session_expired)
+              {
+                echo "## ⚠️ Epic 会话已过期"
+                echo
+                echo "缓存的登录会话已失效，毒档案已清除。下次定时领取将重新执行一次完整登录（需要通过 hCaptcha）。"
+                echo
+                echo "如连续多周出现本状态，请检查账号是否触发了 Epic 的安全策略。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              {
+                echo "## ⚠️ Keepalive 未产出结论"
+                echo
+                echo "探活脚本未写入结局文件（可能启动即失败）。请查看日志工件定位原因。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+      # 无论探活结果如何都回存：alive 时是刷新后的好档案；expired 时脚本已清空目录，
+      # 等价冷启动，不会污染后续运行。
+      - name: Save Epic browser session
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: app/volumes/user_data
+          key: epic-session-${{ github.run_id }}
+
+      - name: Upload log artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: epic-keepalive-logs-${{ github.run_id }}
+          path: app/volumes/logs/
+          retention-days: 7

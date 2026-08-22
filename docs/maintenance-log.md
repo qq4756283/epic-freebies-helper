@@ -1428,3 +1428,35 @@
   - save 步骤使用 `if: always()`：失败运行的档案不含登录态，仅等价于冷启动，不会造成退化；restore-keys 取最近一次保存的档案。
   - schedule 由仅周四扩展为周四/周五/周六每日 UTC 15:20：单日登录失败时由次日运行自动弥补，无需人工修跑。
   - 已知边界：会话过期后的第一次运行仍需一次成功登录重建档案；GLM 长时间不可用时单次运行仍可能失败，但会被后续补跑兜底。
+
+### 2026-08-22 修复浏览器中途崩溃零自愈与毒档案继承：run 32499828624 复盘
+
+- 现象：
+  - Scheduled run `32499828624` 在领取 Cardpocalypse Standard Edition 时整轮失败；日志显示登录 hCaptcha 反复 `signal=failure` 约 7 分钟后登录实际成功，随后点击购买按钮触发导航提交瞬间 Playwright driver 进程死亡：`TypeError: Cannot read properties of undefined (reading 'childFrames') @ frames.js:262`，Python 侧仅见 `Page.wait_for_timeout: Connection closed while reading from the driver`。
+  - 该次运行 restore 了同日被手动取消运行 `32484827457` 保存的档案，登录 URL 携带 `sessionInvalidated=true`，说明缓存档案不含有效会话。
+  - 全链路（collect_epic_games → deploy）没有任何浏览器级重启逻辑，浏览器进程一旦死亡即整轮 exit 1；此前维护日志中同类 `Connection closed` 错误已出现第二次（上次死在退出阶段，本次死在领取中途）。
+- 根因判断：
+  - 直接死因是 playwright 1.53.0 Firefox driver 的帧管理竞态缺陷（导航提交时 FrameManager 访问已分离 frame），属随机触发，与 Epic 页面改版无关。
+  - 结构性根因有二：其一，会话失效的周必须 AI 硬解登录 hCaptcha，题型轮换使每次 prompt 微调只对当期有效，构成无法一劳永逸的军备竞赛；其二，Save 步骤 `if: always()` 会把取消/崩溃运行的半损坏档案存入 cache，后续运行继承劣化起点。
+- 改动文件：
+  - `app/deploy.py`
+  - `app/settings.py`
+  - `app/services/browser_context.py`
+  - `app/services/epic_authorization_service.py`
+  - `app/services/epic_games_service.py`
+  - `app/services/run_outcome.py`（新增）
+  - `scripts/session_keepalive.py`（新增）
+  - `.github/workflows/epic-gamer.yml`
+  - `.github/workflows/epic-session-keepalive.yml`（新增）
+  - `.github/workflows/tests.yml`（新增）
+  - `tests/test_browser_crash_recovery.py`（新增）
+  - `tests/test_profile_marker.py`（新增）
+  - `pyproject.toml`、`uv.lock`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `_is_browser_crash_error()` 分类与 `_execute_browser_tasks_with_restarts()` 包装：捕获 driver 断连类异常后在同一持久化档案上重启浏览器继续领取（默认额外 1 次，`BROWSER_RUN_RESTARTS` 可调）；限流、人工操作、2FA 等业务错误不重试。
+  - playwright 由 1.53.0 升级到最新稳定版，规避 frames.js 竞态崩溃（camoufox/hcaptcha-challenger 对其无版本上限约束）。
+  - 引入档案健康标记 `.profile-ok`：认证成功后写入当前后端 profile 目录；启动时发现目录非空但无标记则清空冷启动，取消/崩溃运行的残留档案不再污染后续运行。
+  - 新增结构化结局文件 `app/volumes/runtime/run-outcome.json`（claimed_ok / all_already_owned / rate_limited / auth_failed_captcha / auth_failed_2fa / manual_action_required / browser_crashed_exhausted），工作流成功/失败摘要优先读取它输出中文结论，替代翻日志定位问题类别。
+  - 新增每周二 UTC 03:00 的 Epic Session Keepalive 工作流：探活并刷新登录会话（alive 则刷新 cookie 回存；expired 则清除毒档案并预警），使周四主跑大概率直接跳过登录环节；schedule 补跑由周四至周六扩展为周四至周日四连保险。
+  - 新增 Tests 工作流承载纯逻辑回归测试（崩溃分类矩阵、重启自愈注入、档案健康守卫），本地遵循仓库约定不执行测试。

@@ -26,6 +26,7 @@ from extensions.hcaptcha_runtime import wait_for_challenge_signal
 from models import OrderItem, Order
 from models import PromotionGame
 from services.epic_authorization_service import EpicManualActionRequiredError
+from services.run_outcome import OUTCOME_ALL_ALREADY_OWNED, OUTCOME_CLAIMED_OK
 from settings import settings, RUNTIME_DIR
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
@@ -145,6 +146,8 @@ class EpicAgent:
         self._orders: List[OrderItem] = []
         self._namespaces: List[str] = []
         self._cookies = None
+        # Terminal claim classification consumed by deploy/run-outcome reporting.
+        self.collection_outcome = OUTCOME_CLAIMED_OK
 
     def _needs_privacy_policy_correction(self) -> bool:
         return "/id/login/correction/privacy-policy" in self.page.url
@@ -341,6 +344,7 @@ class EpicAgent:
     async def collect_epic_games(self):
         if await self._should_ignore_task():
             logger.success("All week-free games are already in the library")
+            self.collection_outcome = OUTCOME_ALL_ALREADY_OWNED
             return
 
         if not self._ctx_cookies_is_available:
@@ -351,6 +355,7 @@ class EpicAgent:
 
         if not self._promotions:
             logger.success("All week-free games are already in the library")
+            self.collection_outcome = OUTCOME_ALL_ALREADY_OWNED
             return
 
         for p in self._promotions:
@@ -363,6 +368,7 @@ class EpicAgent:
             except Exception as e:
                 logger.exception(e)
                 raise
+            self.collection_outcome = OUTCOME_CLAIMED_OK
 
         logger.debug("All tasks in the workflow have been completed")
 

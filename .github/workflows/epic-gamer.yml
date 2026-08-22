@@ -5,10 +5,11 @@ on:
   schedule:
     # Epic 周免在周四刷新；北京时间周四 23:20（UTC 15:20）为主运行，
     # 该时间点放在 Epic 周免刷新之后，避免过早触发。
-    # 周五/周六同一时间自动补跑：某次登录 hCaptcha 失败时由后续运行自愈。
+    # 周五/周六/周日同一时间自动补跑：某次登录 hCaptcha 失败时由后续运行自愈。
     - cron: '20 15 * * 4'
     - cron: '20 15 * * 5'
     - cron: '20 15 * * 6'
+    - cron: '20 15 * * 0'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -119,15 +120,16 @@ jobs:
       - name: Write success summary
         if: success()
         run: |
-          if grep -Rqs -E \
-            'unable to download any more free games|wait 24 hours before trying again|24-hour free-game limit detected' \
-            app/volumes/logs/ app/volumes/runtime/ 2>/dev/null; then
+          OUTCOME_FILE=app/volumes/runtime/run-outcome.json
+          OUTCOME=""
+          if [ -f "$OUTCOME_FILE" ]; then
+            OUTCOME=$(sed -n 's/.*"outcome"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OUTCOME_FILE" | head -n1)
+          fi
+          if [ "$OUTCOME" = "all_already_owned" ]; then
             {
-              echo "## Run stopped: Epic 24-hour limit"
+              echo "## Run completed: nothing to claim"
               echo
-              echo "Action 已正常结束，但本次领取未成功：Epic 已限制该账号继续领取免费游戏。"
-              echo
-              echo "No successful claim was confirmed for the affected account. Wait at least 24 hours before running the workflow again."
+              echo "本周免费游戏此前已全部入库，本次运行未发现新的可领取项目。"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             {
@@ -144,29 +146,76 @@ jobs:
       - name: Write failure summary
         if: failure()
         run: |
-          if grep -Rqs -E \
-            'unable to download any more free games|wait 24 hours before trying again|free-game redemption rate limit detected' \
-            app/volumes/logs/ app/volumes/runtime/ 2>/dev/null; then
-            {
-              echo "## Claim not completed: Epic 24-hour limit"
-              echo
-              echo "本次领取未成功：Epic 已限制该账号继续领取免费游戏。"
-              echo
-              echo "Epic blocked additional free-game redemptions for the affected account. This run did not confirm a successful claim for that account."
-              echo
-              echo "Wait at least 24 hours before running the workflow again. Repeated retries during this period will not complete the claim."
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "## Claim not completed"
-              echo
-              echo "本次领取未完成，不能视为领取成功。"
-              echo
-              echo "The workflow failed before all available games were confirmed in the library. Do not treat this run as a successful claim."
-              echo
-              echo "Review the failed step and uploaded runtime/log artifacts for the specific cause."
-            } >> "$GITHUB_STEP_SUMMARY"
+          OUTCOME_FILE=app/volumes/runtime/run-outcome.json
+          OUTCOME=""
+          if [ -f "$OUTCOME_FILE" ]; then
+            OUTCOME=$(sed -n 's/.*"outcome"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OUTCOME_FILE" | head -n1)
           fi
+          case "$OUTCOME" in
+            rate_limited)
+              {
+                echo "## Claim not completed: Epic 24-hour limit"
+                echo
+                echo "本次领取未成功：Epic 已限制该账号继续领取免费游戏。"
+                echo
+                echo "Epic blocked additional free-game redemptions for the affected account. This run did not confirm a successful claim for that account."
+                echo
+                echo "Wait at least 24 hours before running the workflow again. Repeated retries during this period will not complete the claim."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            auth_failed_captcha|auth_failed_2fa)
+              {
+                echo "## Claim not completed: login failed"
+                echo
+                if [ "$OUTCOME" = "auth_failed_2fa" ]; then
+                  echo "登录失败：Epic 账号仍启用了两步验证。请配置 EPIC_TOTP_SECRET（验证器 App 类 2FA）或关闭 2FA 后重跑。"
+                else
+                  echo "登录失败：hCaptcha 连续求解未通过。周五/周六/周日的定时补跑会自动重试；若连续多天失败，请在周二关注 Keepalive 工作流的会话健康结论。"
+                fi
+                echo
+                echo "Login did not complete. Later scheduled catch-up runs will retry automatically; review the runtime/log artifacts for challenge details."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            browser_crashed_exhausted)
+              {
+                echo "## Claim not completed: browser crashed"
+                echo
+                echo "浏览器后端在运行中崩溃，自动重启后仍未恢复。该故障与 Epic 页面改版无关，通常由 Playwright/Camoufox 偶发缺陷触发。"
+                echo
+                echo "The browser backend died mid-run and the in-run restart also failed. Later scheduled runs will start fresh; attach the runtime artifacts when reporting."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            manual_action_required)
+              {
+                echo "## Claim not completed: manual action required"
+                echo
+                echo "Epic 要求人工确认（隐私政策或 MFA 设置提示）。请用普通浏览器手动登录一次完成对应页面，然后重跑工作流。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              if grep -Rqs -E \
+                'unable to download any more free games|wait 24 hours before trying again|free-game redemption rate limit detected' \
+                app/volumes/logs/ app/volumes/runtime/ 2>/dev/null; then
+                {
+                  echo "## Claim not completed: Epic 24-hour limit"
+                  echo
+                  echo "本次领取未成功：Epic 已限制该账号继续领取免费游戏。"
+                  echo
+                  echo "Wait at least 24 hours before running the workflow again. Repeated retries during this period will not complete the claim."
+                } >> "$GITHUB_STEP_SUMMARY"
+              else
+                {
+                  echo "## Claim not completed"
+                  echo
+                  echo "本次领取未完成，不能视为领取成功。"
+                  echo
+                  echo "The workflow failed before all available games were confirmed in the library. Do not treat this run as a successful claim."
+                  echo
+                  echo "Review the failed step and uploaded runtime/log artifacts for the specific cause."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+          esac
 
       - name: Upload runtime artifacts
         if: always()
