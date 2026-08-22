@@ -62,6 +62,9 @@ class FakePage:
         if self.clock is not None:
             await self.clock.wait(timeout_ms)
 
+    async def screenshot(self, *args, **kwargs):
+        return None
+
 
 class TextBody:
     def __init__(self, text):
