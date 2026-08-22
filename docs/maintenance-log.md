@@ -1460,3 +1460,24 @@
   - 新增结构化结局文件 `app/volumes/runtime/run-outcome.json`（claimed_ok / all_already_owned / rate_limited / auth_failed_captcha / auth_failed_2fa / manual_action_required / browser_crashed_exhausted），工作流成功/失败摘要优先读取它输出中文结论，替代翻日志定位问题类别。
   - 新增每周二 UTC 03:00 的 Epic Session Keepalive 工作流：探活并刷新登录会话（alive 则刷新 cookie 回存；expired 则清除毒档案并预警），使周四主跑大概率直接跳过登录环节；schedule 补跑由周四至周六扩展为周四至周日四连保险。
   - 新增 Tests 工作流承载纯逻辑回归测试（崩溃分类矩阵、重启自愈注入、档案健康守卫），本地遵循仓库约定不执行测试。
+
+### 2026-08-22 回滚 playwright 至 1.53.0 并补齐 Camoufox 协议错配降级
+
+- 现象：
+  - 升级 playwright 1.62.0 后的首次实测 run `32575911211` 在 1 分钟内失败：`BrowserType.launch_persistent_context: Protocol error (Browser.setDefaultViewport)`，伴随 `unrecognized command line flag "-foreground"`；Camoufox v152 内置 juggler 不认识新驱动的协议方法，浏览器启动即中止，且该错误未命中既有 bootstrap 回退标记，整轮直接失败。
+- 根因判断：
+  - camoufox 0.4.11 捆绑的 Firefox/juggler 与 playwright 1.53.x 配套；驱动单方面升级造成协议错配。frames.js 帧竞态的中途崩溃风险已由重启自愈层兜底，驱动升级不再是必要修复。
+  - `_is_camoufox_bootstrap_error()` 缺少协议错配标记，导致 `BROWSER_BACKEND=auto` 下无法降级到 Playwright Firefox。
+- 改动文件：
+  - `pyproject.toml`
+  - `uv.lock`
+  - `app/services/browser_context.py`
+  - `.github/workflows/tests.yml`
+  - `.github/workflows/epic-session-keepalive.yml`
+  - `tests/test_browser_crash_recovery.py`
+  - `app/deploy.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 以 `[tool.uv] constraint-dependencies` 把 playwright 钉回已知良好的 1.53.0；注释明确解钉必须与 camoufox 升级同步进行。
+  - bootstrap 错误识别新增 `protocol error (browser` 标记：今后任何驱动/浏览器协议错配都会自动降级到 Playwright Firefox 继续运行，而不是报废整轮。
+  - 同批修正 Tests 工作流与 Keepalive 工作流在无密钥环境下的 settings 强校验问题（占位 GEMINI_API_KEY；playwright 1.62 的 async_api 并无 TargetClosedError 导出，相关守卫注释同步纠正）。

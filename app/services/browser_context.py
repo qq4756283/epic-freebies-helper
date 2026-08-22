@@ -181,6 +181,10 @@ def _is_camoufox_bootstrap_error(err: Exception) -> bool:
             "rate limit exceeded",
             "profile was last used with a newer version",
             "browsertype.launch_persistent_context: target page, context or browser has been closed",
+            # Driver/browser protocol skew (e.g. playwright newer than the
+            # juggler bundled inside camoufox) aborts the launch; degrade to
+            # the playwright-firefox fallback instead of failing the run.
+            "protocol error (browser",
         )
     )
 
