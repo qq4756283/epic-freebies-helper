@@ -39,4 +39,8 @@ jobs:
         run: uv sync
 
       - name: Run tests
+        env:
+          # hcaptcha-challenger 的 AgentConfig 在 settings 实例化时强校验 LLM key；
+          # 纯逻辑测试不会发起任何模型请求，占位值即可满足构造。
+          GEMINI_API_KEY: dummy-key-for-tests
         run: uv run pytest -q

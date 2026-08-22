@@ -44,9 +44,9 @@ from settings import LOG_DIR
 from settings import settings
 from utils import init_log
 
-try:  # playwright >= 1.45 exposes a dedicated closed-target error type.
+try:  # Some playwright releases expose a dedicated closed-target error type.
     from playwright.async_api import TargetClosedError as _TargetClosedError
-except ImportError:  # pragma: no cover - older playwright pins
+except ImportError:  # pragma: no cover - playwright 1.62 has no such export
     _TargetClosedError = None
 
 # Initialize logging configuration for runtime, error, and serialization logs

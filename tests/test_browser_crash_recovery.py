@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-from playwright.async_api import TargetClosedError
 
 import deploy
 from services.epic_games_service import EpicFreeGameRateLimitError
@@ -19,10 +18,6 @@ def test_message_marker_detects_closed_target():
     assert deploy._is_browser_crash_error(err) is True
 
 
-def test_target_closed_error_type_is_detected():
-    assert deploy._is_browser_crash_error(TargetClosedError("Context closed")) is True
-
-
 def test_cause_chain_is_walked():
     root = Exception("Connection closed while reading from the driver")
     head = RuntimeError("claim flow failed")
@@ -31,7 +26,7 @@ def test_cause_chain_is_walked():
 
 
 def test_context_chain_is_walked():
-    root = TargetClosedError("Target closed")
+    root = Exception("browser has been closed")
     head = RuntimeError("claim flow failed")
     head.__context__ = root
     assert deploy._is_browser_crash_error(head) is True

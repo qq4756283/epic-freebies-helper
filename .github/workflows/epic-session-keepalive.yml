@@ -64,8 +64,9 @@ jobs:
           HEADLESS: virtual
           MPLBACKEND: Agg
           PYTHONPATH: app
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 探活流程不发起任何模型请求；占位值仅为通过 settings 的 key 强校验。
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY || 'keepalive-placeholder' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || 'keepalive-placeholder' }}
         run: |
           echo "🔎 探测 Epic 登录会话健康状态..."
           xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run scripts/session_keepalive.py
