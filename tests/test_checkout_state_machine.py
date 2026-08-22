@@ -280,10 +280,14 @@ def test_observe_checkout_outcome_returns_pending_without_container(monkeypatch)
 def test_security_clearance_requires_recoverable_checkout_state(monkeypatch):
     page = FakePage()
     game = EpicGames(page)
-    visibility = iter([True, False])
+    # Security check is visible on the first probe only; the solve loop keeps
+    # polling visibility until the wait budget is exhausted, so the fake must
+    # answer False indefinitely instead of relying on a finite iterator.
+    visibility_calls = {"count": 0}
 
     async def security_visibility(*args, **kwargs):
-        return next(visibility)
+        visibility_calls["count"] += 1
+        return visibility_calls["count"] == 1
 
     async def not_claimed(*args, **kwargs):
         return False

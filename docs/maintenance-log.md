@@ -1481,3 +1481,15 @@
   - 以 `[tool.uv] constraint-dependencies` 把 playwright 钉回已知良好的 1.53.0；注释明确解钉必须与 camoufox 升级同步进行。
   - bootstrap 错误识别新增 `protocol error (browser` 标记：今后任何驱动/浏览器协议错配都会自动降级到 Playwright Firefox 继续运行，而不是报废整轮。
   - 同批修正 Tests 工作流与 Keepalive 工作流在无密钥环境下的 settings 强校验问题（占位 GEMINI_API_KEY；playwright 1.62 的 async_api 并无 TargetClosedError 导出，相关守卫注释同步纠正）。
+
+### 2026-08-22 修复 Tests 工作流暴露的存量夹具缺陷
+
+- 现象：
+  - 首次接入 pytest CI 后，`test_security_clearance_requires_recoverable_checkout_state` 以 `RuntimeError: coroutine raised StopIteration` 失败（60 passed / 1 failed）；该失败与本日业务代码改动无关。
+- 根因判断：
+  - 测试用 `iter([True, False])` 供给 `_is_checkout_security_check_visible` 的可见性答案；2026-08-18 的状态机修复让 solve loop 在 pending 观察后继续轮询可见性，真实 1 秒等待窗口内会发起远超两次的探测，迭代器耗尽即抛 StopIteration。仓库此前没有 CI 执行 pytest，缺陷长期潜伏。
+- 改动文件：
+  - `tests/test_checkout_state_machine.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 可见性桩改为有状态闭包：首次探测返回 True，其后无限返回 False，匹配"等待预算耗尽后返回 False"的被测语义；测试恢复通过，回归门禁转绿。
