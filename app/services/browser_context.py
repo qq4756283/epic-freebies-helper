@@ -161,20 +161,25 @@ def _camoufox_launch_options(headless: bool | str, proxy: dict[str, str] | None)
     return options
 
 
-def _scrub_camoufox_config(config: dict) -> dict:
-    """Drop legacy navigator keys removed from camoufox properties.json.
+def _scrub_camoufox_config(config: dict, path: object = None) -> dict:
+    """Drop keys unknown to the bundled camoufox properties.json.
 
     camoufox >= 0.4.x rejects unknown keys in validate_config, but its own
-    browserforge mapping still emits e.g. navigator.appCodeName. Removing
-    them here keeps the launch working without a custom fingerprint.
+    browserforge mapping still emits legacy navigator keys (appCodeName,
+    appName, product, productSub, vendorSub, ...). The removed set keeps
+    growing, so filter by allowlist instead of enumerating deletions:
+    keep only keys present in properties.json for the launched binary.
     """
-    for dotted in (
-        "navigator.appCodeName",
-        "navigator.appName",
-        "navigator.productSub",
-        "navigator.vendorSub",
-    ):
-        config.pop(dotted, None)
+    try:
+        from camoufox import utils as camoufox_utils
+
+        allowed = set(camoufox_utils._load_properties(path=path))
+    except Exception:
+        return config
+    if not allowed:
+        return config
+    for key in [k for k in config if k not in allowed]:
+        config.pop(key, None)
     return config
 
 
@@ -253,7 +258,7 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
             _orig_validate = camoufox_utils.validate_config
 
             def _patched_validate(config_map: dict, path: object = None) -> None:
-                _scrub_camoufox_config(config_map)
+                _scrub_camoufox_config(config_map, path=path)
                 return _orig_validate(config_map, path=path)
 
             camoufox_utils.validate_config = _patched_validate

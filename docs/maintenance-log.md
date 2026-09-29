@@ -1552,3 +1552,17 @@
   - Degrade log now includes traceback.format_exc(limit=15) to capture the real UnknownProperty throw site next run.
   - Workflow gains Probe LLM gateway reachability step (GET models + POST chat/completions) before the 25-minute run; runner-side gateway failure surfaces in 1 minute.
   - Pending Actions verification.
+
+### 2026-09-29 allowlist scrub for camoufox fingerprint config
+
+- Symptom:
+  - Probe run 36593937736 traceback proved _patched_validate executes, but after removing 4 keys the next failure was Unknown property navigator.product in config.
+- Root cause:
+  - Removed legacy navigator key set keeps growing (appCodeName/appName/product/productSub/vendorSub...); enumerating deletions can never converge.
+- Changed files:
+  - app/services/browser_context.py
+  - docs/maintenance-log.md
+- Result:
+  - _scrub_camoufox_config now allowlists against camoufox _load_properties(path) for the launched binary; unknown keys are dropped regardless of name.
+  - Gateway probe on runner confirmed HTTP200 for models + chat/completions, so longcat 500 earlier was transient upstream, not runner egress block.
+  - Pending Actions verification: camoufox backend active without degrade.
