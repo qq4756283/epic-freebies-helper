@@ -1509,3 +1509,17 @@
   - Generate linux/firefox fingerprint up front and clear appCodeName/appName/productSub/vendorSub (None values are skipped by _cast_to_properties; verified cfg-bad-keys empty locally).
   - Bootstrap matcher now covers unknown property: residual skew degrades to Playwright Firefox instead of failing the run.
   - Pending Actions verification: after browser launches, verify muse-spark-1.3-contributor-free via GLM-compatible channel solves checkout challenge.
+
+### 2026-09-29 harden GLM channel for narrating models
+
+- Symptom:
+  - Fix-branch run 36554069855 launched the browser (25m44s, no UnknownProperty) but died at login captcha: muse-spark-1.3 via custom gateway returned chatty English ("I see the translucent B to place ...") and unsolicited glob tool_calls instead of schema JSON; parser returned None, retries exhausted, auth failed 8/8.
+- Root cause:
+  - Gateway ignores tool_choice none and weakly enforces response_format json_object for this model; repo parser treated unparseable text as soft None instead of retryable error.
+- Changed files:
+  - app/extensions/llm_adapter.py
+  - docs/maintenance-log.md
+- Result:
+  - Strict-model gate (_is_strict_json_model) prepends JSON-only system instruction and pins temperature 0 + tool_choice none + parallel_tool_calls false.
+  - _extract_text now rejects tool_calls responses with ValueError; _parse_response raises instead of returning None so tenacity retries the call.
+  - Pending Actions verification on real login captcha hit rate.
