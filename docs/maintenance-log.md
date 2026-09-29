@@ -1605,3 +1605,16 @@
 - Result:
   - pending now reloads the product page once and re-checks claimed state, same as checkout.
   - Pending Actions verification on Astrea (free until 2026-10-01).
+
+### 2026-09-30 reload on checkout/pending outcome in submit loop (correct site)
+
+- Symptom:
+  - Run 36619233239: outcome pending after solving check went straight to unconfirmed; the previous reload patch never executed.
+- Root cause:
+  - Previous patch landed in _resolve_checkout_security_check, but the live path returns True there and the outcome branching happens in _handle_instant_checkout after _observe_checkout_outcome. Wrong patch site.
+- Changed files:
+  - app/services/epic_games_service.py
+  - docs/maintenance-log.md
+- Result:
+  - _handle_instant_checkout now reloads the product page once when post-check outcome is checkout or pending, re-checks claimed state, and short-circuits before re-clicking into a fresh check loop.
+  - Pending Actions verification on Astrea (free until 2026-10-01).
