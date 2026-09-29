@@ -1537,3 +1537,18 @@
 - Result:
   - Stop passing fingerprint= (removes LeakWarning); monkeypatch camoufox.utils.validate_config during launch to scrub navigator.appCodeName/appName/productSub/vendorSub from the internally generated config, then restore.
   - Pending Actions verification: camoufox backend active without degrade, then longcat solves login captcha.
+
+### 2026-09-29 add gateway probe and browser degrade traceback
+
+- Symptom:
+  - v2 run 36565377104 confirmed on ba132b4: scrub patch executed but UnknownProperty still degraded to playwright; longcat returned HTTP500 Endpoint unavailable from Actions while local probe got HTTP200.
+- Root cause:
+  - UnknownProperty throw site still unlocated (error.log only records type name); gateway reachability differs between local proxy egress and GitHub runner egress.
+- Changed files:
+  - app/services/browser_context.py
+  - .github/workflows/epic-gamer.yml
+  - docs/maintenance-log.md
+- Result:
+  - Degrade log now includes traceback.format_exc(limit=15) to capture the real UnknownProperty throw site next run.
+  - Workflow gains Probe LLM gateway reachability step (GET models + POST chat/completions) before the 25-minute run; runner-side gateway failure surfaces in 1 minute.
+  - Pending Actions verification.

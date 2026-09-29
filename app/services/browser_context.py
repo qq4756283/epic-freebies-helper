@@ -265,12 +265,15 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
         except Exception as err:
             if backend == "camoufox" or not _is_camoufox_bootstrap_error(err):
                 raise
+            import traceback
+
             logger.error(
                 "Browser backend degraded | from=camoufox | to=playwright-firefox | "
-                "headless_mode={} | proxy_enabled={} | reason={}",
+                "headless_mode={} | proxy_enabled={} | reason={} | traceback={}",
                 headless,
                 proxy is not None,
                 type(err).__name__,
+                traceback.format_exc(limit=15),
             )
         else:
             logger.info(

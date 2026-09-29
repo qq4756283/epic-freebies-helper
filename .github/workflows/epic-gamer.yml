@@ -74,6 +74,44 @@ jobs:
       - name: Install Playwright Firefox fallback
         run: uv run playwright install firefox
 
+      - name: Probe LLM gateway reachability
+        continue-on-error: true
+        env:
+          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_MODEL: ${{ vars.GLM_MODEL || secrets.GLM_MODEL }}
+        run: |
+          python - <<'EOF'
+          import json, os, urllib.request
+          base = (os.environ.get("GLM_BASE_URL") or "").rstrip("/")
+          key = os.environ.get("GLM_API_KEY") or ""
+          model = os.environ.get("GLM_MODEL") or ""
+          print(f"gateway base set: {bool(base)} model={model}")
+          if not base or not key:
+              print("gateway probe skipped: missing base or key")
+              raise SystemExit(0)
+          for path in ("models", "chat/completions"):
+              url = f"{base}/{path}"
+              try:
+                  if path == "models":
+                      req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          ids = [m.get("id") for m in json.load(r).get("data", [])]
+                      print(f"GET {path}: HTTP200 models={len(ids)} has_target={model in ids}")
+                  else:
+                      payload = {"model": model, "messages": [{"role": "user", "content": "Return ONLY {\"ok\":true}"}], "temperature": 0, "response_format": {"type": "json_object"}}
+                      req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+                      with urllib.request.urlopen(req, timeout=60) as r:
+                          print(f"POST {path}: HTTP{r.status} " + r.read().decode()[:200])
+              except Exception as e:
+                  body = ""
+                  try:
+                      body = e.read().decode()[:300]
+                  except Exception:
+                      pass
+                  print(f"{path} FAILED: {e!r} {body}")
+          EOF
+
       - name: Run Epic Awesome Gamer
         env:
           EPIC_EMAIL: ${{ secrets.EPIC_EMAIL }}
