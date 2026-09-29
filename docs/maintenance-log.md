@@ -1493,3 +1493,19 @@
   - `docs/maintenance-log.md`
 - 处理结果：
   - 可见性桩改为有状态闭包：首次探测返回 True，其后无限返回 False，匹配"等待预算耗尽后返回 False"的被测语义；测试恢复通过，回归门禁转绿。
+
+### 2026-09-29 fix camoufox fingerprint skew aborting launch
+
+- Symptom:
+  - Manual run 36550092146 failed in 59s; keepalive 36549814329 failed in 59s with the same error.
+  - Log cause: camoufox.exceptions.UnknownProperty: Unknown property navigator.appCodeName in config at AsyncCamoufox.__aenter__; never reached login/captcha/model calls.
+- Root cause:
+  - camoufox 0.4.11 browserforge.yml still maps legacy navigator keys into config while bundled properties.json removed them, so validate_config rejects launch.
+  - Repo only passed screen constraints; random fingerprints still carried stale keys; _is_camoufox_bootstrap_error did not cover UnknownProperty, so no playwright fallback.
+- Changed files:
+  - app/services/browser_context.py
+  - docs/maintenance-log.md
+- Result:
+  - Generate linux/firefox fingerprint up front and clear appCodeName/appName/productSub/vendorSub (None values are skipped by _cast_to_properties; verified cfg-bad-keys empty locally).
+  - Bootstrap matcher now covers unknown property: residual skew degrades to Playwright Firefox instead of failing the run.
+  - Pending Actions verification: after browser launches, verify muse-spark-1.3-contributor-free via GLM-compatible channel solves checkout challenge.

@@ -20,6 +20,18 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
 
+# camoufox >= 0.4.x removed several legacy navigator fingerprint properties
+# (e.g. navigator.appCodeName) from its bundled properties.json while the
+# browserforge mapping still emits them. Passing them through aborts the
+# launch with `UnknownProperty` before any model call happens, so clear the
+# known-removed keys from the generated fingerprint up front.
+_CAMOUFOX_REMOVED_NAVIGATOR_KEYS = (
+    "appCodeName",
+    "appName",
+    "productSub",
+    "vendorSub",
+)
+
 # Written into the persistent profile after a confirmed login. Profiles restored
 # from cache without this marker never reached a verified session (cancelled or
 # crashed runs) and are wiped before launch instead of being trusted.
@@ -127,17 +139,29 @@ def _browser_proxy_options() -> dict[str, str] | None:
 
 
 def _camoufox_launch_options(headless: bool | str, proxy: dict[str, str] | None) -> dict:
-    from browserforge.fingerprints import Screen
+    from browserforge.fingerprints import FingerprintGenerator, Screen
 
     screen = Screen(max_width=1920, max_height=1080, min_height=1080, min_width=1920)
     firefox_user_prefs = {"network.dns.disableIPv6": True, "network.trr.mode": 5}
     if proxy is None:
         firefox_user_prefs["network.proxy.type"] = 0
 
+    fingerprint = FingerprintGenerator(browser="firefox", os=("linux",)).generate(
+        screen=screen
+    )
+    navigator = getattr(fingerprint, "navigator", None)
+    if navigator is not None:
+        for legacy_key in _CAMOUFOX_REMOVED_NAVIGATOR_KEYS:
+            try:
+                setattr(navigator, legacy_key, None)
+            except Exception:
+                continue
+
     options = {
         "persistent_context": True,
         "user_data_dir": settings.user_data_dir_for("camoufox"),
         "screen": screen,
+        "fingerprint": fingerprint,
         "record_video_dir": RECORD_DIR,
         "record_video_size": _VIEWPORT,
         "firefox_user_prefs": firefox_user_prefs,
@@ -185,6 +209,13 @@ def _is_camoufox_bootstrap_error(err: Exception) -> bool:
             # juggler bundled inside camoufox) aborts the launch; degrade to
             # the playwright-firefox fallback instead of failing the run.
             "protocol error (browser",
+            # camoufox >= 0.4.x validates generated fingerprint keys against
+            # its bundled properties.json. Legacy navigator keys removed
+            # upstream (e.g. navigator.appCodeName) abort the launch even
+            # though the browser itself is healthy; degrade to the fallback
+            # instead of failing the run.
+            "unknown property",
+            "unknownproperty",
         )
     )
 
