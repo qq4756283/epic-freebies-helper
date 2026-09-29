@@ -1493,3 +1493,89 @@
   - `docs/maintenance-log.md`
 - 处理结果：
   - 可见性桩改为有状态闭包：首次探测返回 True，其后无限返回 False，匹配"等待预算耗尽后返回 False"的被测语义；测试恢复通过，回归门禁转绿。
+
+### 2026-09-29 fix camoufox fingerprint skew aborting launch
+
+- Symptom:
+  - Manual run 36550092146 failed in 59s; keepalive 36549814329 failed in 59s with the same error.
+  - Log cause: camoufox.exceptions.UnknownProperty: Unknown property navigator.appCodeName in config at AsyncCamoufox.__aenter__; never reached login/captcha/model calls.
+- Root cause:
+  - camoufox 0.4.11 browserforge.yml still maps legacy navigator keys into config while bundled properties.json removed them, so validate_config rejects launch.
+  - Repo only passed screen constraints; random fingerprints still carried stale keys; _is_camoufox_bootstrap_error did not cover UnknownProperty, so no playwright fallback.
+- Changed files:
+  - app/services/browser_context.py
+  - docs/maintenance-log.md
+- Result:
+  - Generate linux/firefox fingerprint up front and clear appCodeName/appName/productSub/vendorSub (None values are skipped by _cast_to_properties; verified cfg-bad-keys empty locally).
+  - Bootstrap matcher now covers unknown property: residual skew degrades to Playwright Firefox instead of failing the run.
+  - Pending Actions verification: after browser launches, verify muse-spark-1.3-contributor-free via GLM-compatible channel solves checkout challenge.
+
+### 2026-09-29 harden GLM channel for narrating models
+
+- Symptom:
+  - Fix-branch run 36554069855 launched the browser (25m44s, no UnknownProperty) but died at login captcha: muse-spark-1.3 via custom gateway returned chatty English ("I see the translucent B to place ...") and unsolicited glob tool_calls instead of schema JSON; parser returned None, retries exhausted, auth failed 8/8.
+- Root cause:
+  - Gateway ignores tool_choice none and weakly enforces response_format json_object for this model; repo parser treated unparseable text as soft None instead of retryable error.
+- Changed files:
+  - app/extensions/llm_adapter.py
+  - docs/maintenance-log.md
+- Result:
+  - Strict-model gate (_is_strict_json_model) prepends JSON-only system instruction and pins temperature 0 + tool_choice none + parallel_tool_calls false.
+  - _extract_text now rejects tool_calls responses with ValueError; _parse_response raises instead of returning None so tenacity retries the call.
+  - Pending Actions verification on real login captcha hit rate.
+
+### 2026-09-29 scrub camoufox fingerprint config instead of passing custom one
+
+- Symptom:
+  - Runs 36554069855/36557798672/36560408592 all degraded with reason=UnknownProperty even after clearing 4 navigator keys locally; caller-supplied Fingerprint also triggered LeakWarning.
+  - Longcat run 36560408592 made zero model calls: login page never showed a solvable captcha, 8/8 attempts timed out waiting for login outcome.
+- Root cause:
+  - Clearing keys on a caller-built Fingerprint does not cover the config camoufox builds internally via launch_options -> from_browserforge; whatever stale key remains still aborts validate_config.
+- Changed files:
+  - app/services/browser_context.py
+  - docs/maintenance-log.md
+- Result:
+  - Stop passing fingerprint= (removes LeakWarning); monkeypatch camoufox.utils.validate_config during launch to scrub navigator.appCodeName/appName/productSub/vendorSub from the internally generated config, then restore.
+  - Pending Actions verification: camoufox backend active without degrade, then longcat solves login captcha.
+
+### 2026-09-29 add gateway probe and browser degrade traceback
+
+- Symptom:
+  - v2 run 36565377104 confirmed on ba132b4: scrub patch executed but UnknownProperty still degraded to playwright; longcat returned HTTP500 Endpoint unavailable from Actions while local probe got HTTP200.
+- Root cause:
+  - UnknownProperty throw site still unlocated (error.log only records type name); gateway reachability differs between local proxy egress and GitHub runner egress.
+- Changed files:
+  - app/services/browser_context.py
+  - .github/workflows/epic-gamer.yml
+  - docs/maintenance-log.md
+- Result:
+  - Degrade log now includes traceback.format_exc(limit=15) to capture the real UnknownProperty throw site next run.
+  - Workflow gains Probe LLM gateway reachability step (GET models + POST chat/completions) before the 25-minute run; runner-side gateway failure surfaces in 1 minute.
+  - Pending Actions verification.
+
+### 2026-09-29 allowlist scrub for camoufox fingerprint config
+
+- Symptom:
+  - Probe run 36593937736 traceback proved _patched_validate executes, but after removing 4 keys the next failure was Unknown property navigator.product in config.
+- Root cause:
+  - Removed legacy navigator key set keeps growing (appCodeName/appName/product/productSub/vendorSub...); enumerating deletions can never converge.
+- Changed files:
+  - app/services/browser_context.py
+  - docs/maintenance-log.md
+- Result:
+  - _scrub_camoufox_config now allowlists against camoufox _load_properties(path) for the launched binary; unknown keys are dropped regardless of name.
+  - Gateway probe on runner confirmed HTTP200 for models + chat/completions, so longcat 500 earlier was transient upstream, not runner egress block.
+  - Pending Actions verification: camoufox backend active without degrade.
+
+### 2026-09-29 wire GLM timeout into workflow, raise to 110s
+
+- Symptom:
+  - mimo run 36601683469: camoufox backend active, gateway probe HTTP200, challenges served (drag_single/multi_select), but every model call died with empty Retry request (1/3) Exception then challenge timeout; auth failed 8/8.
+- Root cause:
+  - GLM_REQUEST_TIMEOUT_SECONDS defaulted to 50s and was never wired into the workflow env, so large base64 image payloads over runner egress timed out before the gateway answered.
+- Changed files:
+  - .github/workflows/epic-gamer.yml
+  - docs/maintenance-log.md
+- Result:
+  - Workflow passes GLM_REQUEST_TIMEOUT_SECONDS (vars/secrets override, default 110, field cap 120); secret GLM_REQUEST_TIMEOUT_SECONDS=110 set on repo.
+  - Pending Actions verification: model calls complete instead of timing out at 50s.

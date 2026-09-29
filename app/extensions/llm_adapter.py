@@ -108,6 +108,31 @@ GLM_ROUTER_JSON_INSTRUCTION = (
 )
 
 
+def _is_strict_json_model(model: str | None) -> bool:
+    """Models that tend to narrate instead of emitting schema JSON.
+
+    muse-spark via third-party OpenAI gateways often returns tool calls or
+    chatty reasoning text for drag/point challenges. Force deterministic
+    JSON-only output for them.
+    """
+    name = (model or "").strip().lower()
+    return (
+        "muse-spark" in name
+        or "muse spark" in name
+        or "longcat" in name
+        or name.startswith("mimo")
+        or "space-bunny" in name
+        or "space bunny" in name
+    )
+
+
+GLM_STRICT_JSON_INSTRUCTION = (
+    "Respond with ONLY a single JSON object. No explanations, no markdown, "
+    "no code fences, no tool calls. If you cannot solve it, still respond "
+    "with ONLY best-guess JSON in the requested schema."
+)
+
+
 def _ensure_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -1097,10 +1122,13 @@ class _GLMAsyncModels:
 
         return None
 
-    def _build_messages(self, contents: Any, config: Any) -> list[dict[str, Any]]:
+    def _build_messages(self, contents: Any, config: Any, model: str | None = None) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         system_messages: list[str] = []
         has_image = False
+
+        if _is_strict_json_model(model):
+            system_messages.append(GLM_STRICT_JSON_INSTRUCTION)
 
         system_instruction = getattr(config, "system_instruction", None)
         if system_instruction:
@@ -1139,11 +1167,15 @@ class _GLMAsyncModels:
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
-            "messages": self._build_messages(contents, config),
+            "messages": self._build_messages(contents, config, model=model),
         }
 
         temperature = getattr(config, "temperature", None)
-        if temperature is not None:
+        if _is_strict_json_model(model):
+            payload["temperature"] = 0
+            payload["tool_choice"] = "none"
+            payload["parallel_tool_calls"] = False
+        elif temperature is not None:
             payload["temperature"] = temperature
 
         if getattr(config, "response_schema", None) is not None:
@@ -1161,6 +1193,9 @@ class _GLMAsyncModels:
             raise ValueError("GLM response does not contain choices")
 
         message = choices[0].get("message") or {}
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            raise ValueError(f"GLM returned tool calls instead of JSON: {tool_calls!r}"[:500])
         content = message.get("content")
 
         if isinstance(content, str):
@@ -1197,8 +1232,7 @@ class _GLMAsyncModels:
                         text,
                     )
                 else:
-                    logger.warning("GLM structured parse fallback failed | raw_text={}", text[:500])
-                    return None
+                    raise ValueError(f"GLM structured parse failed | raw_text={text[:500]}")
 
         if isinstance(schema, type) and issubclass(schema, BaseModel):
             return schema(**payload)
