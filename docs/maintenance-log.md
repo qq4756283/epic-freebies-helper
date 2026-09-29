@@ -1579,3 +1579,16 @@
 - Result:
   - Workflow passes GLM_REQUEST_TIMEOUT_SECONDS (vars/secrets override, default 110, field cap 120); secret GLM_REQUEST_TIMEOUT_SECONDS=110 set on repo.
   - Pending Actions verification: model calls complete instead of timing out at 50s.
+
+### 2026-09-30 reload product page after checkout check clears
+
+- Symptom:
+  - Control run 36612761823: login ok (cached session), Astrea Get -> Add to library -> security check solved into checkout, then Place Order cycles re-triggered fresh checks forever; final screenshot shows Add to library still present, order never confirmed.
+- Root cause:
+  - After a check clears, the loop re-clicks the button, which triggers another check; Epic sometimes finalizes the free order in the background during the check, so re-clicking never converges.
+- Changed files:
+  - app/services/epic_games_service.py
+  - docs/maintenance-log.md
+- Result:
+  - _resolve_checkout_security_check now reloads the product URL once when outcome is checkout and re-checks _is_claimed_state before returning; claimed short-circuits the submit loop.
+  - Pending Actions verification on Astrea (free until 2026-10-01).

@@ -1408,6 +1408,19 @@ class EpicGames:
                     ),
                 )
                 if outcome in {"claimed", "checkout"}:
+                    # Epic sometimes finalizes the free order in the background
+                    # while the check clears; re-clicking only triggers a fresh
+                    # check loop. Reload the product page once and re-check the
+                    # library state before handing control back to the submit loop.
+                    if outcome == "checkout":
+                        with suppress(Exception):
+                            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                            await page.wait_for_timeout(3000)
+                        if await self._is_claimed_state(page, url):
+                            logger.success(
+                                f"Checkout security check finalized into claimed state after reload - {url=}"
+                            )
+                            return True
                     logger.success("Checkout security check solved into {} - {}", outcome, url)
                     return True
                 logger.warning(
