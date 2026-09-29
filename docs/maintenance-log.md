@@ -1566,3 +1566,16 @@
   - _scrub_camoufox_config now allowlists against camoufox _load_properties(path) for the launched binary; unknown keys are dropped regardless of name.
   - Gateway probe on runner confirmed HTTP200 for models + chat/completions, so longcat 500 earlier was transient upstream, not runner egress block.
   - Pending Actions verification: camoufox backend active without degrade.
+
+### 2026-09-29 wire GLM timeout into workflow, raise to 110s
+
+- Symptom:
+  - mimo run 36601683469: camoufox backend active, gateway probe HTTP200, challenges served (drag_single/multi_select), but every model call died with empty Retry request (1/3) Exception then challenge timeout; auth failed 8/8.
+- Root cause:
+  - GLM_REQUEST_TIMEOUT_SECONDS defaulted to 50s and was never wired into the workflow env, so large base64 image payloads over runner egress timed out before the gateway answered.
+- Changed files:
+  - .github/workflows/epic-gamer.yml
+  - docs/maintenance-log.md
+- Result:
+  - Workflow passes GLM_REQUEST_TIMEOUT_SECONDS (vars/secrets override, default 110, field cap 120); secret GLM_REQUEST_TIMEOUT_SECONDS=110 set on repo.
+  - Pending Actions verification: model calls complete instead of timing out at 50s.
