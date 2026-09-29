@@ -1423,6 +1423,20 @@ class EpicGames:
                             return True
                     logger.success("Checkout security check solved into {} - {}", outcome, url)
                     return True
+                if outcome == "pending":
+                    # Pending means the check cleared but the order state is not
+                    # yet visible; the order may still finalize in the background.
+                    # Reload once and re-check before falling back to re-clicks.
+                    with suppress(Exception):
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(3000)
+                    if await self._is_claimed_state(page, url):
+                        logger.success(
+                            f"Checkout security check finalized into claimed state after reload (pending) - {url=}"
+                        )
+                        return True
+                    logger.success("Checkout security check solved into pending - {}", url)
+                    return True
                 logger.warning(
                     "Checkout security check cleared into an indeterminate state - {}", url
                 )

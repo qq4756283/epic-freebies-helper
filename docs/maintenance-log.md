@@ -1592,3 +1592,16 @@
 - Result:
   - _resolve_checkout_security_check now reloads the product URL once when outcome is checkout and re-checks _is_claimed_state before returning; claimed short-circuits the submit loop.
   - Pending Actions verification on Astrea (free until 2026-10-01).
+
+### 2026-09-30 reload on pending checkout outcome too
+
+- Symptom:
+  - Claim-fix run 36616965478: security check solved but outcome was pending (not checkout); reload logic skipped, loop ended instant_checkout_unconfirmed; Astrea still unclaimed.
+- Root cause:
+  - Reload-after-clear only handled outcome checkout; pending (check cleared, order state invisible) fell through to warn+continue without ever re-checking the library.
+- Changed files:
+  - app/services/epic_games_service.py
+  - docs/maintenance-log.md
+- Result:
+  - pending now reloads the product page once and re-checks claimed state, same as checkout.
+  - Pending Actions verification on Astrea (free until 2026-10-01).
