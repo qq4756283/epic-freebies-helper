@@ -116,7 +116,14 @@ def _is_strict_json_model(model: str | None) -> bool:
     JSON-only output for them.
     """
     name = (model or "").strip().lower()
-    return "muse-spark" in name or "muse spark" in name
+    return (
+        "muse-spark" in name
+        or "muse spark" in name
+        or "longcat" in name
+        or name.startswith("mimo")
+        or "space-bunny" in name
+        or "space bunny" in name
+    )
 
 
 GLM_STRICT_JSON_INSTRUCTION = (
