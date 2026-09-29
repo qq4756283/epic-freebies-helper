@@ -22,15 +22,8 @@ _PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
 
 # camoufox >= 0.4.x removed several legacy navigator fingerprint properties
 # (e.g. navigator.appCodeName) from its bundled properties.json while the
-# browserforge mapping still emits them. Passing them through aborts the
-# launch with `UnknownProperty` before any model call happens, so clear the
-# known-removed keys from the generated fingerprint up front.
-_CAMOUFOX_REMOVED_NAVIGATOR_KEYS = (
-    "appCodeName",
-    "appName",
-    "productSub",
-    "vendorSub",
-)
+# browserforge mapping still emits them. Kept for the validate_config patch
+# in open_browser_context.
 
 # Written into the persistent profile after a confirmed login. Profiles restored
 # from cache without this marker never reached a verified session (cancelled or
@@ -139,29 +132,23 @@ def _browser_proxy_options() -> dict[str, str] | None:
 
 
 def _camoufox_launch_options(headless: bool | str, proxy: dict[str, str] | None) -> dict:
-    from browserforge.fingerprints import FingerprintGenerator, Screen
+    from browserforge.fingerprints import Screen
 
     screen = Screen(max_width=1920, max_height=1080, min_height=1080, min_width=1920)
     firefox_user_prefs = {"network.dns.disableIPv6": True, "network.trr.mode": 5}
     if proxy is None:
         firefox_user_prefs["network.proxy.type"] = 0
 
-    fingerprint = FingerprintGenerator(browser="firefox", os=("linux",)).generate(
-        screen=screen
-    )
-    navigator = getattr(fingerprint, "navigator", None)
-    if navigator is not None:
-        for legacy_key in _CAMOUFOX_REMOVED_NAVIGATOR_KEYS:
-            try:
-                setattr(navigator, legacy_key, None)
-            except Exception:
-                continue
-
     options = {
         "persistent_context": True,
         "user_data_dir": settings.user_data_dir_for("camoufox"),
         "screen": screen,
-        "fingerprint": fingerprint,
+        # NOTE: do NOT pass fingerprint= here. camoufox generates it internally
+        # from os/screen constraints; a caller-supplied Fingerprint triggers
+        # LeakWarning and still carries browserforge legacy navigator keys
+        # (appCodeName/appName/...) that newer properties.json rejects with
+        # UnknownProperty. Legacy keys are scrubbed in _scrub_camoufox_config
+        # via a launch_options wrapper below.
         "record_video_dir": RECORD_DIR,
         "record_video_size": _VIEWPORT,
         "firefox_user_prefs": firefox_user_prefs,
@@ -172,6 +159,23 @@ def _camoufox_launch_options(headless: bool | str, proxy: dict[str, str] | None)
         options["proxy"] = proxy
         options["geoip"] = True
     return options
+
+
+def _scrub_camoufox_config(config: dict) -> dict:
+    """Drop legacy navigator keys removed from camoufox properties.json.
+
+    camoufox >= 0.4.x rejects unknown keys in validate_config, but its own
+    browserforge mapping still emits e.g. navigator.appCodeName. Removing
+    them here keeps the launch working without a custom fingerprint.
+    """
+    for dotted in (
+        "navigator.appCodeName",
+        "navigator.appName",
+        "navigator.productSub",
+        "navigator.vendorSub",
+    ):
+        config.pop(dotted, None)
+    return config
 
 
 def _playwright_launch_options(
@@ -232,6 +236,7 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
     if backend in {"auto", "camoufox"}:
         try:
             from camoufox import AsyncCamoufox
+            from camoufox import utils as camoufox_utils
 
             camoufox_headless = (
                 False if headless == "virtual" and os.getenv("DISPLAY") else headless
@@ -239,8 +244,24 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
             camoufox_options = _camoufox_launch_options(camoufox_headless, proxy)
             ensure_healthy_profile(Path(str(camoufox_options["user_data_dir"])))
             _mark_active_profile_dir(Path(str(camoufox_options["user_data_dir"])))
-            camoufox = AsyncCamoufox(**camoufox_options)
-            browser = await camoufox.__aenter__()
+
+            # Scrub legacy navigator keys from the internally generated
+            # fingerprint config. camoufox builds the config inside
+            # launch_options -> from_browserforge; monkeypatching
+            # validate_config lets us drop keys its own mapping emits but
+            # its bundled properties.json no longer accepts.
+            _orig_validate = camoufox_utils.validate_config
+
+            def _patched_validate(config_map: dict, path: object = None) -> None:
+                _scrub_camoufox_config(config_map)
+                return _orig_validate(config_map, path=path)
+
+            camoufox_utils.validate_config = _patched_validate
+            try:
+                camoufox = AsyncCamoufox(**camoufox_options)
+                browser = await camoufox.__aenter__()
+            finally:
+                camoufox_utils.validate_config = _orig_validate
         except Exception as err:
             if backend == "camoufox" or not _is_camoufox_bootstrap_error(err):
                 raise

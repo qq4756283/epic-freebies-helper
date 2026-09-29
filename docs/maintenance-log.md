@@ -1523,3 +1523,17 @@
   - Strict-model gate (_is_strict_json_model) prepends JSON-only system instruction and pins temperature 0 + tool_choice none + parallel_tool_calls false.
   - _extract_text now rejects tool_calls responses with ValueError; _parse_response raises instead of returning None so tenacity retries the call.
   - Pending Actions verification on real login captcha hit rate.
+
+### 2026-09-29 scrub camoufox fingerprint config instead of passing custom one
+
+- Symptom:
+  - Runs 36554069855/36557798672/36560408592 all degraded with reason=UnknownProperty even after clearing 4 navigator keys locally; caller-supplied Fingerprint also triggered LeakWarning.
+  - Longcat run 36560408592 made zero model calls: login page never showed a solvable captcha, 8/8 attempts timed out waiting for login outcome.
+- Root cause:
+  - Clearing keys on a caller-built Fingerprint does not cover the config camoufox builds internally via launch_options -> from_browserforge; whatever stale key remains still aborts validate_config.
+- Changed files:
+  - app/services/browser_context.py
+  - docs/maintenance-log.md
+- Result:
+  - Stop passing fingerprint= (removes LeakWarning); monkeypatch camoufox.utils.validate_config during launch to scrub navigator.appCodeName/appName/productSub/vendorSub from the internally generated config, then restore.
+  - Pending Actions verification: camoufox backend active without degrade, then longcat solves login captcha.
