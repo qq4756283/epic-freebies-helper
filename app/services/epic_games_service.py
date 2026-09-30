@@ -1694,6 +1694,24 @@ class EpicGames:
                 logger.debug(f"Place Order button disappeared after {name} click. {url=}")
                 return True
 
+            # Free orders may finalize in the background slower than the
+            # 1500ms above (manual claims confirm the account can order).
+            # Wait once more before declaring this click a no-op, so a slow
+            # backend finalize is not mistaken for a failed submission.
+            await self.page.wait_for_timeout(8000)
+            await self._raise_if_free_game_rate_limited(self.page, url)
+            if await self._is_claimed_state(self.page, url):
+                logger.debug(
+                    f"Place Order {name} click finalized into claimed state after extended wait. {url=}"
+                )
+                return True
+
+            if not await self._is_locator_visible(active_btn):
+                logger.debug(
+                    f"Place Order button disappeared after {name} click extended wait. {url=}"
+                )
+                return True
+
             after_state = await self._payment_button_state(active_btn)
             overlay_id = await self._visible_talon_overlay_id(self.page)
             if after_state != before_state or overlay_id != before_overlay:
@@ -1717,7 +1735,14 @@ class EpicGames:
             url,
             await self._payment_button_state(payment_btn),
         )
-        await self.page.wait_for_timeout(1500)
+        # Last-chance background finalize check: the order may have gone
+        # through while clicks appeared to do nothing (manual claims show
+        # the account can order; the backend is just slow).
+        await self.page.wait_for_timeout(15000)
+        await self._raise_if_free_game_rate_limited(self.page, url)
+        if await self._is_claimed_state(self.page, url):
+            logger.debug(f"Place Order finalized into claimed state after final wait. {url=}")
+            return True
         return False
 
     async def _observe_checkout_outcome(self, page: Page, url: str, timeout_ms: int = 20000) -> str:

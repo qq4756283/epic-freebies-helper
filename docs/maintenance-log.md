@@ -1618,3 +1618,16 @@
 - Result:
   - _handle_instant_checkout now reloads the product page once when post-check outcome is checkout or pending, re-checks claimed state, and short-circuits before re-clicking into a fresh check loop.
   - Pending Actions verification on Astrea (free until 2026-10-01).
+
+### 2026-09-30 extend post-click waits for slow backend finalize
+
+- Symptom:
+  - Astrea runs: verification solved, outcome pending, reload confirmed not in library; user manual claim on same account succeeded, proving the account can order.
+- Root cause:
+  - _submit_place_order waited only 1500ms+750ms after each click before declaring no-op; slow backend finalize never got observed, loop fell into fresh check cycles.
+- Changed files:
+  - app/services/epic_games_service.py
+  - docs/maintenance-log.md
+- Result:
+  - 8s extended claimed-state check after each click; 15s final background-finalize check after all strategies.
+  - Pending live verification on next free rotation (Astrea manually claimed, no target left until 2026-10-01 rotation).
