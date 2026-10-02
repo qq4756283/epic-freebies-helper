@@ -1716,3 +1716,33 @@
     `GLM_MODEL` and `LLM_PROVIDER` secrets are untouched and remain the fallback -- deleting the
     variables reverts cleanly.
   - Pending live verification on the next free rotation.
+### 2026-10-02 live verification of the three 2026-10-02 fixes
+
+- Symptom:
+  - Needed live evidence that the order-history stall fix, the point-filtering fix and the
+    gpt-6-astra routing actually work, none of which could be proven by the repo's test suite.
+- Root cause:
+  - Not a defect; this entry records the verification run dispatched on top of commit 14dde97.
+- Changed files:
+  - docs/maintenance-log.md
+- Result:
+  - Manual run 36977197596 finished `completed/success` in 475s, versus ~1800s and exit code 1 for
+    scheduled run 36920932284.
+  - Gateway probe passed: `GET models: HTTP200 models=75 has_target=True`,
+    `POST chat/completions: HTTP200` with `"model":"gpt-6-astra"`.
+  - Routing confirmed for all four roles: `challenge_classifier`, `image_classifier`,
+    `spatial_point_reasoner` and `spatial_path_reasoner` all `workbuddy/global/gpt-6-astra`.
+  - Both promotions that failed on 36920932284 were genuinely claimed this time, not skipped:
+    System Shock 2 and Buried Stars each reported
+    `Checkout security check solved into claimed` followed by
+    `Checkout outcome after solving security check: claimed` and
+    `Game already claimed / in library (purchase button marker 'IN LIBRARY')`.
+    Final `outcome=claimed_ok`.
+  - This is a real claim, unlike run 36656493103 which reported success only because both of its
+    games were already in the library.
+  - Neither fallback path was exercised, which is the intended outcome: `_is_promotion_in_order_history`
+    was never called because the claim confirmed on the primary path, and no point was dropped by
+    `_filter_safe_points`, meaning gpt-6-astra returned coordinates already inside the challenge
+    bounds. Both fixes are therefore verified as non-regressions rather than as exercised paths.
+  - HSW reverse still logs `HSW reverse failed, fallback to regular processing` a few times per run
+    and is unaffected by any of these changes; it remains upstream noise from hcaptcha-challenger.
