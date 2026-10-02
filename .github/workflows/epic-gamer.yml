@@ -77,8 +77,8 @@ jobs:
       - name: Probe LLM gateway reachability
         continue-on-error: true
         env:
-          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_BASE_URL: ${{ vars.GLM_BASE_URL || secrets.GLM_BASE_URL }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY_V2 || secrets.GLM_API_KEY }}
           GLM_MODEL: ${{ vars.GLM_MODEL || secrets.GLM_MODEL }}
         run: |
           python - <<'EOF'
@@ -124,8 +124,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL }}
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY_V2 || secrets.GLM_API_KEY }}
+          GLM_BASE_URL: ${{ vars.GLM_BASE_URL || secrets.GLM_BASE_URL }}
           GLM_MODEL: ${{ vars.GLM_MODEL || secrets.GLM_MODEL }}
           GLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.GLM_REQUEST_TIMEOUT_SECONDS || secrets.GLM_REQUEST_TIMEOUT_SECONDS || '110' }}
           CHALLENGE_CLASSIFIER_MODEL: ${{ vars.CHALLENGE_CLASSIFIER_MODEL || secrets.CHALLENGE_CLASSIFIER_MODEL }}

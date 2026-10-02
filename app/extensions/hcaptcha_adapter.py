@@ -146,16 +146,21 @@ def _point_inside_bounds(
     return x_min <= x <= x_max and y_min <= y <= y_max
 
 
-def _point_answer_validation_error(
+def _filter_safe_points(
     points: list[Any],
     *,
     challenge_bbox: dict[str, float] | None,
     clickable_bounds: tuple[float, float, float, float] | None,
-) -> str | None:
+) -> tuple[list[Any], list[str]]:
+    """Split model points into the subset that is safe to click and why the rest were dropped.
+
+    A single out-of-bounds coordinate must not discard the points that were already
+    valid, otherwise one bad answer wastes the whole challenge attempt.
+    """
     if not points:
-        return "model returned no click points"
+        return [], ["model returned no click points"]
     if challenge_bbox is None:
-        return None
+        return list(points), []
 
     challenge_bounds = (
         float(challenge_bbox["x"]),
@@ -163,13 +168,22 @@ def _point_answer_validation_error(
         float(challenge_bbox["x"]) + float(challenge_bbox["width"]),
         float(challenge_bbox["y"]) + float(challenge_bbox["height"]),
     )
+    safe_points: list[Any] = []
+    rejected_reasons: list[str] = []
     for point in points:
         coordinates = float(point.x), float(point.y)
         if not _point_inside_bounds(coordinates, challenge_bounds):
-            return f"point {coordinates} is outside challenge bounds {challenge_bounds}"
+            rejected_reasons.append(
+                f"point {coordinates} is outside challenge bounds {challenge_bounds}"
+            )
+            continue
         if clickable_bounds is not None and not _point_inside_bounds(coordinates, clickable_bounds):
-            return f"point {coordinates} is outside clickable grid {clickable_bounds}"
-    return None
+            rejected_reasons.append(
+                f"point {coordinates} is outside clickable grid {clickable_bounds}"
+            )
+            continue
+        safe_points.append(point)
+    return safe_points, rejected_reasons
 
 
 def _build_point_prompt(
@@ -775,21 +789,20 @@ def apply_hcaptcha_drag_patch() -> None:
                 )
                 logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')
 
-                validation_error = _point_answer_validation_error(
+                safe_points, rejected_reasons = _filter_safe_points(
                     response.points,
                     challenge_bbox=challenge_bbox,
                     clickable_bounds=clickable_bounds,
                 )
-                if validation_error is not None:
-                    logger.warning(
-                        "Rejected unsafe hCaptcha point answer | reason={}", validation_error
-                    )
-                    raise ValueError(f"Unsafe hCaptcha point answer: {validation_error}")
+                for reason in rejected_reasons:
+                    logger.warning("Dropped unsafe hCaptcha point | reason={}", reason)
+                if not safe_points:
+                    raise ValueError(f"Unsafe hCaptcha point answer: {rejected_reasons[0]}")
 
                 self._spatial_point_reasoner.cache_response(
                     path=cache_key.joinpath(f"{cache_key.name}_{cid}_model_answer.json")
                 )
-                for point in response.points:
+                for point in safe_points:
                     await self.page.mouse.click(point.x, point.y, delay=180)
                     await self.page.wait_for_timeout(500)
 

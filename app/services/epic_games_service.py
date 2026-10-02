@@ -1519,14 +1519,9 @@ class EpicGames:
         return True
 
     async def _is_promotion_in_order_history(self, promotion: PromotionGame) -> bool:
-        try:
-            await self.page.goto(URL_ORDER_HISTORY, wait_until="domcontentloaded", timeout=15000)
-            text_content = await self.page.text_content("//pre")
-            payload = json.loads(text_content or "{}")
-        except Exception as err:
-            logger.warning(
-                f"Failed to verify order history for promotion '{promotion.title}': {err!r}"
-            )
+        payload = await self._load_order_history_payload()
+        if payload is None:
+            logger.warning(f"Failed to verify order history for promotion '{promotion.title}'")
             return False
 
         for order_payload in payload.get("orders", []):

@@ -1631,3 +1631,88 @@
 - Result:
   - 8s extended claimed-state check after each click; 15s final background-finalize check after all strategies.
   - Pending live verification on next free rotation (Astrea manually claimed, no target left until 2026-10-01 rotation).
+
+### 2026-10-02 order-history confirmation no longer stalls 30s per attempt
+
+- Symptom:
+  - Scheduled run 36920932284 (2026-10-01) failed with exit code 1 after ~30 minutes:
+    `RuntimeError: Failed to confirm claim flow for promotions: system-shock-2-25th-anniversary-remaster-cb94d9, buried-stars-d7c88c`.
+    From 20:38 to 20:51 the run repeated `Page.text_content: Timeout 30000ms exceeded. waiting for locator("//pre")`
+    roughly a dozen times and could never make progress.
+- Root cause:
+  - `_is_promotion_in_order_history` fetched URL_ORDER_HISTORY with a bare
+    `page.text_content("//pre")` -- no explicit timeout (so Playwright's 30s default) and no
+    fallback. When the endpoint stops returning a raw JSON body, Chromium renders no `<pre>`
+    and every call burns 30s before raising TimeoutError, which is swallowed into `return False`
+    and retried, so the check could never succeed and only converted an unconfirmed claim into
+    a hard crash.
+  - `_load_order_history_payload` already handles this correctly (explicit `timeout=5000` plus a
+    `body.inner_text` fallback), but the fatal path did not reuse it.
+- Changed files:
+  - app/services/epic_games_service.py
+  - docs/maintenance-log.md
+- Result:
+  - `_is_promotion_in_order_history` now delegates to `_load_order_history_payload`, so both
+    callers of URL_ORDER_HISTORY share one bounded, fallback-capable fetch.
+  - Worst-case stall per call drops from 30s to ~5s, and the promotion title stays in the warning.
+  - Ruff baseline comparison: 206 -> 203 findings, no new rules (one BLE001 removed with the
+    bare `except`). Test execution is not permitted in this repo, so verification was static only.
+  - Pending live verification on the next free rotation.
+
+### 2026-10-02 keep valid hCaptcha points when one coordinate is out of bounds
+
+- Symptom:
+  - Run 36920932284, attempt 2 of the checkout security check:
+    `Rejected unsafe hCaptcha point answer | reason=point (310.0, 450.0) is outside challenge bounds (390.0, 93.5, 890.0, 563.5)`.
+    The model had returned three points; (465, 290) and (710, 365) were both inside bounds and
+    valid, but the whole attempt was discarded because the third point fell 80px left of the
+    challenge box.
+- Root cause:
+  - `_point_answer_validation_error` returned on the first offending point and the caller raised,
+  so a single bad coordinate from a multi-point answer threw away every valid point with it and
+  wasted a whole challenge attempt.
+- Changed files:
+  - app/extensions/hcaptcha_adapter.py
+  - docs/maintenance-log.md
+- Result:
+  - Replaced the all-or-nothing check with `_filter_safe_points`, which partitions the answer into
+    a clickable subset plus the rejection reasons. Each rejected point is logged as
+    `Dropped unsafe hCaptcha point`; only an answer with no survivable point still raises.
+  - Click safety is unchanged: nothing outside the challenge box or the clickable grid is clicked.
+  - Ruff baseline comparison shows no new findings on this file.
+  - Pending live verification on the next free rotation.
+
+### 2026-10-02 route spatial point reasoning to gpt-6-astra
+
+- Symptom:
+  - Run 36920932284: the checkout hCaptcha was cleared twice
+    (`Checkout security check solved into checkout`) yet both games stayed `pending` and ended
+    `Instant checkout ended without a confirmed claim state`. Challenge solving was unreliable
+    across the run: repeated `HSW reverse failed, fallback to regular processing` and repeated
+    `NS_ERROR_INVALID_CONTENT_ENCODING` while injecting the hsw script.
+- Root cause:
+  - External anti-bot pressure rather than a code defect: the captcha loop itself recovered, but the
+  order never reached a confirmed state, so the claim could not be verified.
+  - The existing model routing was also a poor fit for the spatial point task.
+- Changed files:
+  - .github/workflows/epic-gamer.yml
+  - docs/maintenance-log.md
+- Result:
+  - Benchmarked the candidate gateway (http://115.120.244.178:5242/v1) with generated challenges that
+    have known ground truth, on three shapes of task: easy grid, harder 4x4 compound-rule grid, and
+    a production-shaped crop that must answer in page coordinates while the image origin differs.
+  - `workbuddy/global/gpt-6-astra` was the only candidate that returned page-pixel coordinates on
+    every trial: 100% recall and 100% precision across all three benchmarks, 15/15 on the
+    production-shaped runs, ~5.5s average latency (well inside the 120s execution timeout).
+  - `workbuddy/global/gpt-5.6-luna` looked equal on the first two benchmarks but silently reverted
+    to image coordinates on 1 of 5 production-shaped trials, which would click the wrong place.
+  - `workbuddy/cn/glm-5v-turbo` is fast (2.9s) and accurate on the image-origin tests but answers in
+    normalized 0-1000 space and ignored the page-bounds constraint (16% recall production-shaped),
+  so it cannot be wired without an adapter change.
+  - `workbuddy/global/default-model` was unstable (75% recall, wild 4-95s latency).
+  - `gpt-5.6-sol` and `gpt-5.6-terra` returned HTTP 502 and were rejected.
+  - Wiring is non-destructive: `GLM_BASE_URL` and the model now come from repository variables,
+    and the new key is stored as `GLM_API_KEY_V2`. The original `GLM_API_KEY`, `GLM_BASE_URL`,
+    `GLM_MODEL` and `LLM_PROVIDER` secrets are untouched and remain the fallback -- deleting the
+    variables reverts cleanly.
+  - Pending live verification on the next free rotation.
