@@ -1971,3 +1971,32 @@
   - 验证限制：尚未完成一次端到端"登录→铸造令牌→下次运行 0 验证码→领取成功"的闭环；下一次
     运行应出现 `Session vault: token stored | source=browser_login`，再下一次应出现
     `session seeded from token` 且不出现登录页。
+
+### 2026-10-21 一次性引导脚本 bootstrap_refresh_token.py（本地一次登录 → 云端永久免登录）
+
+- 现象：
+  - 连续 4 次云端运行（39474484991 / 39476988894 / 39479080488 / 39480563263）验证：
+    模型端点修好后验证码已能解（出现两次 `Challenge success`），但 Epic 的登录结果仍会
+    `Timed out waiting for Epic login outcome`，或登录成功后 store 报 `isloggedin=false`。
+    机房 IP + 每次新会话的组合决定了"能不能过"不可控。
+- 根因判断：
+  - 登录是唯一验证码产地，而云端没有任何稳定手段保证一次登录成功。只要能把"登录"这一步
+    挪出台北（人工一次），后续所有运行都可以只做纯 HTTP 令牌续期 + cookie 播种。
+  - 因此瓶颈不在算法，而在"能否拿到一个长效 refresh_token"。这需要一个一次性的引导动作。
+- 改动文件：
+  - `scripts/bootstrap_refresh_token.py`（新增）：本机可见浏览器（优先系统 Chrome/Edge，
+    其次 Playwright Firefox，持久 profile 放在 `app/volumes/bootstrap_profile`）打开 Epic
+    登录页 → 轮询订单历史接口判定登录完成 → 调 `session_vault.mint_from_context()` 铸造
+    launcher refresh_token → `refresh_access_token()` 验证一次（同时完成服务器侧轮换）→
+    可选 `gh secret set EPIC_REFRESH_TOKEN`。密码只在 Epic 页面输入，脚本不接触；token 只写
+    到 git-ignored 的 `app/volumes/runtime/refresh-token.txt` 与状态文件，终端只打印掩码。
+    支持 `--check` 自检、`--timeout`、`--no-secret`、`--yes`。
+  - `app/services/session_vault.py`：`refresh_access_token()` 拆出 `_refresh_with()`，当缓存
+    令牌被 400/401/403 拒绝时清状态并用 `EPIC_REFRESH_TOKEN` 再试一次——这样 secret 是真正
+    可回退的兜底，而不是一次性摆设。
+- 处理结果：
+  - 自检通过（playwright 可导入、session_vault 可导入、gh 已登录、profile 目录可建）。
+  - 使用方式：`cd repo && uv run python scripts/bootstrap_refresh_token.py`，浏览器里登录一次，
+    脚本自动写 secret；随后 `gh workflow run epic-gamer.yml` 即可验证下一次运行 0 验证码。
+  - 验证限制：脚本的真实登录/铸造路径需要人工在浏览器里完成一次登录才能端到端验证，本地
+    尚未执行（无交互条件）。静态检查：ruff（含 isort）、black --check、py_compile、`--check`。

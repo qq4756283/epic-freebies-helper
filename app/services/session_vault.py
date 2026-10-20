@@ -177,52 +177,70 @@ def _store_token_payload(payload: dict[str, Any], source: str) -> bool:
 
 
 # --- token refresh (no browser) -------------------------------------------------
-async def refresh_access_token() -> str | None:
-    """Exchange the stored refresh token for a fresh access token.
-
-    Epic rotates refresh tokens: the response carries a new one, and the old value
-    stops working. Persisting the rotated value is therefore mandatory.
-    """
-    state = read_state()
-    refresh_token = (state.get("refresh_token") or "").strip()
-    if not refresh_token:
-        refresh_token = (os.getenv("EPIC_REFRESH_TOKEN") or "").strip()
-        if refresh_token:
-            logger.info("Session vault: using EPIC_REFRESH_TOKEN from the environment")
-    if not refresh_token:
-        return None
-
-    payload = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "token_type": "eg1",
-    }
+async def _refresh_with(token: str) -> tuple[int, dict[str, Any] | None]:
+    """POST one refresh grant; returns (http_status, body). Never raises."""
+    payload = {"grant_type": "refresh_token", "refresh_token": token, "token_type": "eg1"}
     try:
         async with _client() as client:
             response = await client.post(OAUTH_TOKEN_URL, data=payload, auth=_basic_auth())
     except Exception as err:  # network/proxy/DNS — never fatal for the run
         logger.warning("Session vault: refresh request failed | error={!r}", err)
-        return None
-
+        return 0, None
     if response.status_code != 200:
         logger.warning(
             "Session vault: refresh rejected | status={} | body={}",
             response.status_code,
             response.text[:200],
         )
-        if response.status_code in (400, 401, 403):
-            clear_state(f"refresh_rejected_{response.status_code}")
-        return None
-
+        return response.status_code, None
     try:
         body = response.json()
     except ValueError:
         logger.warning("Session vault: refresh response was not JSON")
-        return None
+        return response.status_code, None
+    return response.status_code, body if isinstance(body, dict) else None
 
-    if not _store_token_payload(body, source="refresh"):
-        return None
-    return body.get("access_token")
+
+async def refresh_access_token() -> str | None:
+    """Exchange the stored refresh token for a fresh access token.
+
+    Epic rotates refresh tokens: the response carries a new one, and the old value stops
+    working, so the rotated value is always persisted. If the cached token is rejected
+    while a different ``EPIC_REFRESH_TOKEN`` exists, the cached state is dropped and the
+    environment token is tried once - that is what lets the secret act as a real fallback
+    after a manual re-bootstrap.
+    """
+    state = read_state()
+    state_token = (state.get("refresh_token") or "").strip()
+    env_token = (os.getenv("EPIC_REFRESH_TOKEN") or "").strip()
+
+    if not state_token:
+        if not env_token:
+            return None
+        logger.info("Session vault: using EPIC_REFRESH_TOKEN from the environment")
+        status, body = await _refresh_with(env_token)
+        if body is None:
+            if status in (400, 401, 403):
+                logger.warning(
+                    "Session vault: EPIC_REFRESH_TOKEN is not usable; remove or refresh it"
+                )
+            return None
+        return body.get("access_token") if _store_token_payload(body, "env_token") else None
+
+    status, body = await _refresh_with(state_token)
+    if body is not None:
+        return body.get("access_token") if _store_token_payload(body, "refresh") else None
+
+    if status in (400, 401, 403):
+        clear_state(f"refresh_rejected_{status}")
+        if env_token and env_token != state_token:
+            logger.warning("Session vault: cached token rejected; retrying with EPIC_REFRESH_TOKEN")
+            status, body = await _refresh_with(env_token)
+            if body is not None:
+                return body.get("access_token") if _store_token_payload(body, "env_token") else None
+            if status in (400, 401, 403):
+                logger.warning("Session vault: EPIC_REFRESH_TOKEN is not usable either")
+    return None
 
 
 async def access_token() -> str | None:
