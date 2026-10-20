@@ -49,6 +49,10 @@ OAUTH_TOKEN_URL = os.getenv(
     "EPIC_OAUTH_TOKEN_URL",
     "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token",
 )
+# The web client that owns store.epicgames.com / www.epicgames.com sessions. Codes issued
+# for this client are the ones ``id/api/exchange`` accepts, which is why seeding uses it
+# while minting has to keep the launcher client (that pair is what grants a refresh token).
+WEB_CLIENT_ID = os.getenv("EPIC_WEB_CLIENT_ID", "007c0bfe154c4f5396648f013c641dcf")
 WEB_REDIRECT_URL = "https://www.epicgames.com/id/api/redirect"
 WEB_EXCHANGE_URL = "https://www.epicgames.com/id/api/exchange"
 ORDER_HISTORY_URL = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
@@ -353,40 +357,50 @@ async def try_seed(context: Any) -> bool:
 
 
 async def _seed(context: Any, token: str) -> bool:
-    redirect = await context.request.get(
-        WEB_REDIRECT_URL,
-        params={"clientId": LAUNCHER_CLIENT_ID, "responseType": "code"},
-        headers={"Authorization": f"bearer {token}"},
-        timeout=HTTP_TIMEOUT_SECONDS * 1000,
-    )
-    if redirect.status != 200:
-        logger.warning(
-            "Session vault: seed redirect rejected | status={} | body={}",
-            redirect.status,
-            await _api_text(redirect),
+    codes: list[str] = []
+    # Web client first: id/api/exchange only accepts codes issued for it. The launcher
+    # client stays as a second attempt so a client-id change on Epic's side degrades
+    # instead of breaking outright.
+    for client_id in (WEB_CLIENT_ID, LAUNCHER_CLIENT_ID):
+        redirect = await context.request.get(
+            WEB_REDIRECT_URL,
+            params={"clientId": client_id, "responseType": "code"},
+            headers={"Authorization": f"bearer {token}"},
+            timeout=HTTP_TIMEOUT_SECONDS * 1000,
         )
+        if redirect.status != 200:
+            logger.warning(
+                "Session vault: seed redirect rejected | client={} | status={} | body={}",
+                client_id,
+                redirect.status,
+                await _api_text(redirect),
+            )
+            continue
+        code = ((await _api_json(redirect)) or {}).get("authorizationCode")
+        if not code:
+            logger.warning("Session vault: seed redirect returned no authorizationCode")
+            continue
+        logger.info("Session vault: authorization code issued | client={}", client_id)
+        codes.append(code)
+
+    if not codes:
         return False
 
-    code = ((await _api_json(redirect)) or {}).get("authorizationCode")
-    if not code:
-        logger.warning("Session vault: seed redirect returned no authorizationCode")
-        return False
-
-    exchange = await context.request.get(
-        WEB_EXCHANGE_URL,
-        params={"code": code},
-        timeout=HTTP_TIMEOUT_SECONDS * 1000,
-    )
-    if exchange.status >= 400:
+    for code in codes:
+        exchange = await context.request.get(
+            WEB_EXCHANGE_URL,
+            params={"code": code},
+            timeout=HTTP_TIMEOUT_SECONDS * 1000,
+        )
+        if exchange.status < 400:
+            logger.success("Session vault: session seeded from token | status={}", exchange.status)
+            return True
         logger.warning(
             "Session vault: cookie exchange rejected | status={} | body={}",
             exchange.status,
             await _api_text(exchange),
         )
-        return False
-
-    logger.success("Session vault: session seeded from token | status={}", exchange.status)
-    return True
+    return False
 
 
 async def ensure_state(context: Any) -> bool:
