@@ -667,6 +667,12 @@ class EpicAuthorization:
             return None
 
     async def _has_account_session(self) -> bool:
+        # Prefer the XHR/JSON probe: it shares the browser cookie jar and does not depend
+        # on the endpoint rendering raw JSON inside <pre> after a navigation.
+        payload = await session_vault.load_order_history(self.page.context)
+        if payload is not None:
+            logger.success("Epic account session verified via order history endpoint")
+            return True
         try:
             await self.page.goto(URL_ORDER_HISTORY, wait_until="domcontentloaded", timeout=15000)
             text_content = ""
@@ -687,6 +693,8 @@ class EpicAuthorization:
         deadline = time.monotonic() + timeout_seconds
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
+        handshake_attempted = False
+        false_rounds = 0
 
         while time.monotonic() < deadline:
             if self._needs_privacy_policy_correction():
@@ -705,11 +713,36 @@ class EpicAuthorization:
             status = await self._get_login_status(timeout_ms=1500)
             if status == "true":
                 return
+
             if status == "false":
-                raise RuntimeError(
-                    "Epic store still reports isloggedin=false after authentication. "
-                    f"current_url={self.page.url}"
-                )
+                false_rounds += 1
+                # The account login can fully succeed while the storefront SPA still
+                # renders isloggedin=false: the store reads its own session cookie, which
+                # only exists after the token handshake. Do the handshake and reload once
+                # instead of failing a login that already worked.
+                if not handshake_attempted:
+                    handshake_attempted = True
+                    logger.warning(
+                        "Epic store reports isloggedin=false after a successful login; "
+                        "running the session vault handshake (mint + seed) and reloading"
+                    )
+                    minted = await session_vault.mint_from_context(self.page.context)
+                    if minted:
+                        await session_vault.try_seed(self.page.context)
+                    await self.page.reload(wait_until="domcontentloaded")
+                    await self.page.wait_for_timeout(2000)
+                    continue
+
+                if false_rounds >= 3:
+                    if await self._has_account_session():
+                        return
+                    raise RuntimeError(
+                        "Epic store still reports isloggedin=false after authentication. "
+                        f"current_url={self.page.url}"
+                    )
+                await self.page.reload(wait_until="domcontentloaded")
+                await self.page.wait_for_timeout(1500)
+                continue
 
             if not account_probe_attempted and time.monotonic() >= account_probe_at:
                 account_probe_attempted = True
