@@ -1746,3 +1746,198 @@
     bounds. Both fixes are therefore verified as non-regressions rather than as exercised paths.
   - HSW reverse still logs `HSW reverse failed, fallback to regular processing` a few times per run
     and is unaffected by any of these changes; it remains upstream noise from hcaptcha-challenger.
+### 2026-10-20 新增重构计划文档（不出代码改动）
+
+- Symptom:
+  - Scheduled runs keep failing at the login stage. Between 2026-10-08 and 2026-10-11 four consecutive
+    runs ended with `outcome=auth_failed_captcha`; the run right before them (2026-10-05) succeeded.
+- Root-cause judgment (evidence-based, see the new plan doc):
+  - All 15 sampled non-successful runs failed in the same place: `Run Epic Awesome Gamer` ->
+    `Epic Games authentication failed after 8 attempts`. No checkout, discovery, or infrastructure
+    failures were observed in the sample.
+  - Successful runs restored a cached profile produced by a previous successful run and never saw a
+    real challenge. Failed runs restored a profile produced by a previous failed run, because the
+    cache save step uses `if: always()`; that profile has no valid session, so the next run must log
+    in again and faces the login challenge again. Failures therefore replicate themselves.
+  - The model gateway in use (`http://.../v1`, model `workbuddy/global/gpt-6-astra`) contributes
+    `HTTPStatusError` / `RetryError` / `AttributeError('NoneType' ... 'locator')` into the same
+    8-attempt budget, which masks infrastructure flakiness as captcha failure.
+- Changed files:
+  - docs/refactor-plan-2026-10.md (new)
+- Result:
+  - Planning document only; runtime behavior is unchanged. It records the run statistics, the
+    poisoned-cache cascade, the model-budget coupling, the 2026 ecosystem evidence that pure-API
+    claiming of weekly BASE_GAME offers is structurally rejected, and a staged refactor plan
+    (P0 stop-the-bleeding, P1 architecture, P2 optional) with acceptance metrics.
+
+### 2026-10-20 重构计划文档改写为 v2（零预算 / 免费模型）
+
+- Symptom:
+  - The v1 plan (same day) recommended paid fallbacks (external captcha solvers, residential proxies,
+    paid models). That contradicts the project's economics: the payoff is one or two free games per week,
+    so any recurring spend makes the project pointless.
+- Root-cause judgment (doc-level, not code-level):
+  - With zero budget, the only levers are (a) fewer login attempts, (b) fewer captcha challenges,
+    (c) cheaper per-challenge solving (local CV and a small local VLM), and (d) cheap failure
+    (degrade to a notification with a prefilled link).
+  - Free models are scarce, not unlimited: free tiers impose per-minute and per-day caps, so the plan
+    now budgets model calls the same way it budgets login attempts.
+  - Verified free options as of 2026-10: Zhipu `glm-4v-flash` (documented as fully free image
+    understanding), 12 free image-capable models on OpenRouter `:free`, and local `qwen3-vl`
+    (2b/4b/8b) via Ollama at zero cost. Paid `glm-5.3-flash`, external solvers and residential
+    proxies are explicitly excluded.
+- Changed files:
+  - docs/refactor-plan-2026-10.md (rewritten as v2; v1 content replaced)
+- Result:
+  - Document now contains the zero-cost resource inventory, per-challenge-type model routing,
+    a weekly quota ledger with 429 cooldown rules, a captcha chain with no paid provider,
+    three zero-cost topologies (self-hosted runner recommended, Actions-only as stopgap,
+    notification-only as the floor), and a staged P0/P1/P2 plan whose acceptance metric
+    includes "currency cost per week = 0".
+
+### 2026-10-20 接入智谱免费视觉模型池并新增探针脚本
+
+- Symptom:
+  - The project owner supplied three free Zhipu vision models (`glm-4.6v-flash`,
+    `glm-4.1v-thinking-flash`, `glm-4v-flash`) plus an API key for
+    `https://open.bigmodel.cn/api/paas/v4`.
+- Root-cause judgment:
+  - All three models returned HTTP 401 `令牌已过期或验证不正确` on every endpoint tried:
+    `/api/paas/v4/chat/completions` (text and image, raw-base64 and data-URL encodings),
+    `/api/paas/v4/models`, `/api/coding/paas/v4/chat/completions`, and `/api/v1/responses`.
+    Authorization header with and without `Bearer` behaved identically.
+  - Because the failure is identical across models, encodings and endpoints, it is an
+    authentication-layer rejection, not a model-name, payload or image-encoding problem.
+  - Zhipu announced (effective 2026-10-16) that standard API keys, personal Coding Plan keys and
+    team plan keys are managed separately and are not interchangeable, so a plan key cannot be used
+    against the standard `/api/paas/v4` endpoint.
+- Changed files:
+  - scripts/probe_llm_pool.py (new)
+  - docs/refactor-plan-2026-10.md (model inventory, routing table, degradation chain,
+    config matrix, appendix and ADR updated)
+  - .env (GLM_API_KEY / GLM_MODEL pointed at the free pool; file is gitignored)
+- Result:
+  - `scripts/probe_llm_pool.py` renders a synthetic challenge image with known dot coordinates and
+    reports reachability, latency, token usage, JSON compliance and pixel error per provider, so the
+    routing table is filled from measurements instead of guesses.
+  - Current probe output: three targets, three 401s. The free models stay listed as confirmed-but-
+    unverified slots; the routing table keys off slot order, not vendor names, so a new key needs no
+    code change.
+  - Required follow-up from the owner: create a *standard* API key at
+    https://bigmodel.cn/usercenter/proj-mgmt/apikeys (not the Coding Plan page), put it in `.env`
+    as `GLM_API_KEY`, then re-run the probe.
+
+### 2026-10-20 智谱免费模型实测：Key 生效，主力模型改为 glm-4.1v-thinking-flash
+
+- Symptom:
+  - The first key supplied was a 32-hex string with no dot separator and returned 401 on all four
+    endpoints. The replacement key uses the standard `{id}.{secret}` shape and authenticates.
+- Measurement (scripts/probe_llm_pool.py, 2 runs per model, two task shapes):
+  - Task A, 3x3 grid multi-select (discrete answer space, closest to `image_label_multi_select`):
+    - `glm-4.1v-thinking-flash` 2/2 correct, 2020-2249 ms, 420-458 tokens.
+    - `glm-4v-flash` 2/2 correct, 728-5174 ms, 321 tokens.
+    - `glm-4.6v-flash` 0/2, HTTP 429 `code=1305` "该模型当前访问量过大".
+  - Task B, free-form coordinate pointing (continuous answer space, like `image_drag_*`):
+    - `glm-4.1v-thinking-flash` 2/2 answered, pixel error 66.9/274.1 and 67.7/274.8 px on a
+      1280x720 image, 3595-4535 ms, ~1600 tokens.
+    - `glm-4v-flash` pixel error 442.8/161.6 px, and both runs returned the identical points
+      [[640,100],[960,650]], i.e. it guesses a fixed grid instead of looking.
+    - `glm-4.6v-flash` 0/2, `code=1305`.
+- Root-cause judgment:
+  - The free models count and select cells reliably but cannot localise coordinates. Anything whose
+    answer is a free-form coordinate must stay on local CV; models are only usable where the answer
+    space is discrete (cell indices, yes/no).
+  - `glm-4.6v-flash` has the best specification (128K) but is effectively unavailable during peak
+    hours on the free tier, so it cannot be the primary model. `glm-4.1v-thinking-flash` is the only
+    model that was both stable and accurate in this window.
+- Changed files:
+  - scripts/probe_llm_pool.py (added `--task points|grid`, `--repeat`, summary block with
+    ok/rate_limited/correct/latency percentiles, grid image builder)
+  - docs/refactor-plan-2026-10.md (section 3.1.1 rewritten with measured data, routing table,
+    degradation chain, config matrix and ADR updated to the measured reality)
+  - .env (GLM_API_KEY replaced with the working key; GLM_MODEL set to glm-4.1v-thinking-flash)
+- Result:
+  - Routing is now evidence-based: discrete-answer challenges go to `glm-4.1v-thinking-flash`
+    (default) or `glm-4v-flash` (cheaper/faster), coordinate challenges stay on local CV, and
+    `glm-4.6v-flash` is treated as opportunistic only.
+  - Caveat recorded in the doc: the probe image is synthetic, so these numbers set routing priority
+    rather than predicting real hCaptcha pass rates; a replay set built from historical challenge
+    artifacts is still required.
+
+### 2026-10-21 方向文档 v3：三重失效复盘（假成功 / 验证层失效 / 定时静默）
+
+- Symptom:
+  - 2026-10-14 起 8 天内 0 次定时触发（应触发 5 次：周四/五/六/日主跑 + 周二 keepalive），
+    四个 workflow 的 `state` 仍为 `active`，仓库自 2026-10-02 起无提交。
+  - 本地留存的三份"成功"日志（ok-37057555847 / ok-37145277172 / ok-37225282197）全部是空转：
+    `Epic Games is already logged in` → 两个商品按钮均为 `In Library` → `outcome=claimed_ok`，
+    耗时 1m43s–1m51s，没有任何一次真实点击领取。
+  - 15 份失败日志中 10 份为 `auth_failed_captcha`（8 次重试 × 155s 等待，12–35 分钟），
+    5 份为 `Failed to confirm claim flow`（09-29 astrea、10-01 System Shock 2 + Buried Stars）。
+  - 订单历史探测在**每一轮**（含成功轮）抛
+    `JSONDecodeError('Expecting value: line 1 column 1 (char 0)')`。
+- Root-cause judgment:
+  - 主因不在"解题率"，而在"出题率 × 进不去门"：登录是全流程唯一验证码产地，而会话过期后
+    必然冷启动登录；两次失败轮（38079483724 / 38168649816）的 GLM 网关返回
+    `500 no account available`（66 次 / 81 次），说明当时没有任何 provider 健康判断，
+    模型层硬故障被当成"题目难"处理，白烧 25 分钟。
+  - `_load_order_history_payload` 用 `page.goto` 抓 `<pre>` 再 `json.loads`，该端点已要求
+    AJAX/JSON 语义 → 恒失败 → `namespaces` 恒空 → "已拥有"判定失效 → 领取确认的第三条证据
+    永远不成立 → 09-29/10-01 的确认失败是确定性失败，不是偶发。
+  - `In Library` 被当作 `claimed_ok`，`success` 因此可以在"什么都没做"的情况下达成，
+    并把空转运行写入 `epic-session-ok-*`，污染下一轮会话健康判断。
+  - 定时静默死亡属于 GitHub schedule 的静默丢触发/自动停用，项目没有任何 deadman 检测，
+    失败从"可观测"退化为"不可观测"。
+- Changed files:
+  - docs/direction-2026-10-v3.md（新增：方向文档 v3，含证据基线、优劣势盘点、D1–D9 评估、
+    v3 四层架构、P0/P1/P2 计划、E1–E3 关键实验、明确不做清单）
+  - docs/maintenance-log.md（本条）
+  - 仓库代码未改动；本条目只记录判断与计划，不含运行时行为变更。
+- Result:
+  - 结论写入方向文档 §0 与 §1；P0 三项（提交工作区已有的两次级缓存 / AUTH_MAX_ATTEMPTS=3 /
+    阶段遥测、手动 dispatch 复跑、cherry-pick 上游 7c3bfb5 + 70354be）为下一步动作。
+  - 待决策项：D1 的 E1/E2 实验（需要真实账号产出 refresh_token）、执行面选择（Actions vs
+    家用 runner）、主告警通道（WXPush vs Telegram）、already_owned 是否计入 success。
+
+### 2026-10-21 云端免登录会话 + 每天一次调度 + 订单历史改 JSON
+
+- 现象：
+  - 15 份失败日志中 10 份死在登录 hCaptcha（8 次重试 × 155s），3 份"成功"日志全是空转
+    （`already logged in` → 商品页 `In Library` → `claimed_ok`，1m43s 结束）。
+  - 订单历史探测在每一轮（含成功轮）抛 `JSONDecodeError`，导致"已拥有"判定与领取确认
+    长期失效。
+  - 2026-10-14 起 8 天 0 次定时触发，工作流仍为 active，无人知晓。
+- 根因判断：
+  - 登录页是验证码唯一产地，而会话只能靠浏览器 profile 的剩余寿命维持；profile 一过期
+    就必须走登录页，失败面 100% 集中在 AUTH 阶段。
+  - `_load_order_history_payload` 用页面导航 + 解析 `<pre>` 抓 JSON，该端点已要求 XHR/JSON
+    语义，因此恒失败；`In Library` 被直接当作领取成功，运行可以在"什么都没做"时变绿。
+  - GitHub 的 schedule 会静默丢触发，项目没有任何 deadman，失败从可观测退化为不可观测。
+- 改动文件：
+  - `app/services/session_vault.py`（新增）：令牌金库。`mint_from_context()` 用已登录的浏览器
+    会话走 authorization-code 铸造 launcher refresh_token；`try_seed()` 用令牌换 web 授权码并
+    经 `context.request` 交换 cookie（与浏览器共享 cookie jar），使 store 打开即已登录；
+    `refresh_access_token()` 纯 HTTP 续期并回写轮换后的 refresh_token；`load_order_history()`
+    以 XHR 头读取订单 JSON。全部 best-effort，失败返回 False，绝不抛给调用方。
+  - `app/services/epic_authorization_service.py`：`invoke()` 在任何页面操作前先
+    `try_seed(context)`；登录成功（含"已登录"快路径）后 `ensure_state(context)` 铸造/回写令牌。
+  - `app/services/epic_games_service.py`：订单历史改为先走 `session_vault.load_order_history()`
+    （JSON），旧页面抓取降级为兜底；新增 `_already_owned` / `_claimed_count` 计数，`In Library`
+    只产出 `all_already_owned`，只有结账成功/即时领取/订单命中才产出 `claimed_ok`。
+  - `scripts/scoreboard.py`（新增）：把每次运行追加进 `docs/scoreboard.json`，并计算"距上次
+    已验证领取的天数"，超过 8 天打印 deadman 警告。
+  - `.github/workflows/epic-gamer.yml`：cron 由"周四/五/六/日 4 次"改为每天 1 次
+    （`30 16 * * *`，北京 00:30）；缓存路径加入 `app/volumes/runtime/session-state.json`；
+    新增 `EPIC_REFRESH_TOKEN` / `SESSION_STATE_ENABLED`；新增 scoreboard 步骤（仅 claimed 或
+    每周一提交，避免噪音提交，同时让仓库保持活跃）；job 增加 `permissions: contents: write`。
+  - `.github/workflows/epic-session-keepalive.yml`：停用定时（保留手动诊断），避免与每日
+    领取工作流重复登录与缓存交叉污染。
+  - `docs/direction-2026-10-v3.md`（新增方向文档，见 §0/§3/§5）。
+- 处理结果：
+  - 正常路径：首次运行浏览器登录一次 → 自动铸造 refresh_token 存进会话档 → 之后每次纯 HTTP
+    续期 + cookie 播种，登录页不再出现，登录验证码从"每周必出"变为"每月最多一次"。
+  - 兜底路径：令牌缺失/被吊销时自动回落到密码登录，行为与改动前一致（不会更差）。
+  - 验证限制：本机无真实账号，未执行联网登录；已通过 `ruff`（含 isort）、`black --check`、
+    `py_compile`，并对 `session_vault` 的 14 项无网络行为（无令牌短路、令牌持久化、401 降级、
+    非 JSON 订单响应降级、状态清除）做了本地 smoke 校验，全部通过。真实链路需由首次 Actions
+    运行验证，日志里应出现 `Session vault: token stored` 与后续 `session seeded from token`。

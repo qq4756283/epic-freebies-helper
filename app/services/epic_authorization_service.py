@@ -15,17 +15,22 @@ from pathlib import Path
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
+from extensions.hcaptcha_runtime import wait_for_challenge_signal
 from hcaptcha_challenger.agent import AgentV
 from hcaptcha_challenger.models import ChallengeSignal
 from loguru import logger
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import expect, Page, Response
+from playwright.async_api import Page, Response, expect
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
-from extensions.hcaptcha_runtime import wait_for_challenge_signal
-from services.browser_context import ACTIVE_PROFILE_DIR_ENV, PROFILE_HEALTH_MARKER
-from services.epic_totp_service import redact_totp_inputs, submit_totp_challenge, totp_login_enabled
 from settings import SCREENSHOTS_DIR, settings
+
+from services import session_vault
+from services.browser_context import ACTIVE_PROFILE_DIR_ENV, PROFILE_HEALTH_MARKER
+from services.epic_totp_service import (
+    redact_totp_inputs,
+    submit_totp_challenge,
+    totp_login_enabled,
+)
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 URL_ORDER_HISTORY = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
@@ -846,6 +851,17 @@ class EpicAuthorization:
         self._invalid_totp_rejections = 0
         self._last_captcha_totp_refresh_at = 0.0
 
+        # Rebuild the session from the stored token before touching any page. This is the
+        # only path that removes the login page - and therefore the login hCaptcha - from a
+        # normal run. Failure here is non-fatal: the password login below still works.
+        seeded = await session_vault.try_seed(self.page.context)
+        if seeded:
+            logger.info(
+                "Session vault: token-seeded session attempted | {} | seeded={}",
+                session_vault.describe(),
+                seeded,
+            )
+
         max_attempts = settings.AUTH_MAX_ATTEMPTS
         for attempt in range(1, max_attempts + 1):
             await self._goto_claim_page()
@@ -861,11 +877,13 @@ class EpicAuthorization:
             if "true" == await self._get_login_status():
                 logger.success("Epic Games is already logged in")
                 self._mark_profile_healthy()
+                await session_vault.ensure_state(self.page.context)
                 return True
 
             try:
                 if await self._login():
                     self._mark_profile_healthy()
+                    await session_vault.ensure_state(self.page.context)
                     return True
             except EpicManualActionRequiredError:
                 raise

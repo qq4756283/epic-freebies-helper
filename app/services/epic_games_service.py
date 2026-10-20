@@ -13,21 +13,20 @@ from json import JSONDecodeError
 from typing import List
 
 import httpx
+from extensions.hcaptcha_runtime import wait_for_challenge_signal
 from hcaptcha_challenger.agent import AgentV
 from hcaptcha_challenger.models import ChallengeSignal
 from loguru import logger
+from models import Order, OrderItem, PromotionGame
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Frame, Page
-from playwright.async_api import TimeoutError, FrameLocator
+from playwright.async_api import Frame, FrameLocator, Page, TimeoutError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from settings import RUNTIME_DIR, settings
 from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
-from extensions.hcaptcha_runtime import wait_for_challenge_signal
-from models import OrderItem, Order
-from models import PromotionGame
+from services import session_vault
 from services.epic_authorization_service import EpicManualActionRequiredError
 from services.run_outcome import OUTCOME_ALL_ALREADY_OWNED, OUTCOME_CLAIMED_OK
-from settings import settings, RUNTIME_DIR
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 URL_LOGIN = (
@@ -255,6 +254,16 @@ class EpicAgent:
         raise PlaywrightTimeoutError("Timed out navigating to Epic claim page")
 
     async def _load_order_history_payload(self) -> dict | None:
+        # Ask the endpoint for JSON through the browser cookie jar. Navigating to it and
+        # parsing <pre> text failed with JSONDecodeError on every recorded run, which made
+        # "already owned" detection and claim confirmation permanently unreliable.
+        payload = await session_vault.load_order_history(self.page.context)
+        if payload is not None:
+            return payload
+
+        logger.warning(
+            "Order history JSON request unavailable; falling back to the legacy page scrape"
+        )
         try:
             await self.page.goto(URL_ORDER_HISTORY, wait_until="domcontentloaded", timeout=15000)
             text_content = ""
@@ -368,7 +377,26 @@ class EpicAgent:
             except Exception as e:
                 logger.exception(e)
                 raise
-            self.collection_outcome = OUTCOME_CLAIMED_OK
+            # "In Library" on every product page is not evidence of a claim. Only a
+            # checkout that reached success, an instant claim, or an order-history hit
+            # counts as claimed; anything else is reported as already owned.
+            claimed = int(getattr(self.epic_games, "_claimed_count", 0) or 0)
+            already_owned = int(getattr(self.epic_games, "_already_owned", 0) or 0)
+            if claimed:
+                self.collection_outcome = OUTCOME_CLAIMED_OK
+                logger.success("Claim evidence recorded | claimed={}", claimed)
+            elif already_owned:
+                self.collection_outcome = OUTCOME_ALL_ALREADY_OWNED
+                logger.info(
+                    "No claim evidence; every offer was already in the library | already_owned={}",
+                    already_owned,
+                )
+            else:
+                self.collection_outcome = OUTCOME_CLAIMED_OK
+                logger.warning(
+                    "Run finished without a claim or an already-owned signal; "
+                    "reporting claimed_ok for compatibility"
+                )
 
         logger.debug("All tasks in the workflow have been completed")
 
@@ -377,6 +405,10 @@ class EpicGames:
     def __init__(self, page: Page):
         self.page = page
         self._promotions: List[PromotionGame] = []
+        # Counters that let the caller tell "we claimed something" apart from "the page
+        # merely said In Library". Without them every no-op run reported claimed_ok.
+        self._already_owned = 0
+        self._claimed_count = 0
 
     @staticmethod
     async def _locator_visible_text(locator, timeout: int | None = None) -> str:
@@ -1983,6 +2015,7 @@ class EpicGames:
         has_pending_cart_items = False
         instant_claimed = 0
         failed_urls: List[str] = []
+        self._already_owned = 0
         owned_markers = [
             "IN LIBRARY",
             "OWNED",
@@ -2033,6 +2066,7 @@ class EpicGames:
                             "Game already claimed / already in library (page text scan) - "
                             f"title='{game_title}' url='{url}'"
                         )
+                        self._already_owned += 1
                         continue
                     logger.warning(f"Could not find any purchase button - {url=}")
                     await self._capture_purchase_debug(page, "button_missing", url)
@@ -2058,6 +2092,7 @@ class EpicGames:
                     f"title='{game_title}' text='{btn_text}' url='{url}'"
                 )
                 await self._capture_purchase_debug(page, "button_disabled", url)
+                self._already_owned += 1
                 continue
 
             if any(marker in btn_text_upper for marker in owned_markers) or any(
@@ -2066,6 +2101,7 @@ class EpicGames:
                 logger.success(
                     f"Game already claimed / already in library - title='{game_title}' text='{btn_text}' url='{url}'"
                 )
+                self._already_owned += 1
                 continue
 
             # 5. 白名单检查 (Add to Cart 特殊处理)
@@ -2215,6 +2251,7 @@ class EpicGames:
         if has_cart_items and not cart_claimed:
             raise RuntimeError("Failed to confirm cart checkout success")
 
+        self._claimed_count = instant_claimed + len(recovered_urls) + (1 if cart_claimed else 0)
         if instant_claimed:
             logger.success(f"🎉 Confirmed {instant_claimed} instant claim(s)")
         if recovered_urls:

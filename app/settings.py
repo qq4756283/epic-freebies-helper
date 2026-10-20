@@ -93,7 +93,9 @@ class EpicSettings(AgentConfig):
     ENABLE_APSCHEDULER: bool = Field(default=True)
     TASK_TIMEOUT_SECONDS: int = Field(default=900)
     AUTH_ATTEMPT_TIMEOUT_SECONDS: int = Field(default=240, ge=60, le=600)
-    AUTH_MAX_ATTEMPTS: int = Field(default=5, ge=3, le=8)
+    # Three attempts is enough: a fourth consecutive login failure is an IP/identity problem, and
+    # retrying only raises the risk score while stretching a 15-minute failure into 20 minutes.
+    AUTH_MAX_ATTEMPTS: int = Field(default=3, ge=3, le=5)
     # Extra browser launches allowed when the browser backend dies mid-run
     # (e.g. Playwright driver crash). 0 keeps the legacy single-attempt behavior.
     BROWSER_RUN_RESTARTS: int = Field(default=1, ge=0, le=3)

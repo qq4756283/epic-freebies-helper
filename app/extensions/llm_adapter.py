@@ -3,7 +3,9 @@ import ast
 import base64
 import json
 import mimetypes
+import os
 import re
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,46 @@ from pydantic import BaseModel
 CHALLENGE_TYPE_VALUES = frozenset(member.value for member in ChallengeTypeEnum)
 REQUEST_TYPE_VALUES = frozenset(member.value for member in RequestType)
 KNOWN_CHALLENGE_TYPES = CHALLENGE_TYPE_VALUES | REQUEST_TYPE_VALUES
+
+# --- rate-limit cooldown --------------------------------------------------------
+# Zhipu answers an overloaded free model with HTTP 429 and body {"code":"1305"}
+# ("该模型当前访问量过大"). Retrying the same model inside one run only burns the attempt
+# budget and delays the downgrade, so a hit puts that model on a short cooldown and later
+# calls fail fast instead of issuing another request.
+GLM_RATE_LIMIT_CODES = frozenset({"1302", "1303", "1304", "1305", "1308", "1113"})
+_COOLDOWN_SECONDS = float(os.getenv("GLM_RATE_LIMIT_COOLDOWN_SECONDS", "90") or 90)
+_cooldown_until: dict[str, float] = {}
+
+
+class GlmRateLimitedError(RuntimeError):
+    """Raised instead of re-requesting a model that is cooling down after a rate limit."""
+
+
+def _cooldown_key(model: str, base_url: str) -> str:
+    return f"{base_url.rstrip('/')}|{model}"
+
+
+def is_model_cooling(model: str, base_url: str) -> float:
+    """Return the remaining cooldown in seconds for this model (0.0 when available)."""
+    return max(0.0, _cooldown_until.get(_cooldown_key(model, base_url), 0.0) - time.monotonic())
+
+
+def start_model_cooldown(model: str, base_url: str, seconds: float | None = None) -> float:
+    """Put a model on cooldown after a rate-limit response; returns the applied duration."""
+    duration = _COOLDOWN_SECONDS if seconds is None else seconds
+    duration = max(0.0, float(duration))
+    _cooldown_until[_cooldown_key(model, base_url)] = time.monotonic() + duration
+    logger.warning(
+        "GLM model cooling down | model={} | seconds={:.0f} | later calls fail fast",
+        model,
+        duration,
+    )
+    return duration
+
+
+def reset_model_cooldowns() -> None:
+    """Clear all cooldowns (tests and long-lived scheduler runs)."""
+    _cooldown_until.clear()
 
 CHALLENGE_PROMPT_ALIASES = (
     "challenge_prompt",
@@ -1239,7 +1281,7 @@ class _GLMAsyncModels:
 
         return payload
 
-    def _log_glm_error(self, response: httpx.Response):
+    def _log_glm_error(self, response: httpx.Response, model: str = "", endpoint: str = ""):
         body = response.text[:2000]
         code = ""
         message = ""
@@ -1249,13 +1291,16 @@ class _GLMAsyncModels:
             code = str(error.get("code") or "")
             message = str(error.get("message") or "")
 
-        if response.status_code == 429 or code in {"1302", "1303", "1304", "1308", "1113"}:
+        if response.status_code == 429 or code in GLM_RATE_LIMIT_CODES:
             logger.error(
-                "GLM quota/rate limit issue | http_status={} | code={} | message={}",
+                "GLM quota/rate limit issue | http_status={} | code={} | model={} | message={}",
                 response.status_code,
                 code,
+                model,
                 message or body,
             )
+            if model:
+                start_model_cooldown(model, endpoint)
             return
 
         if response.status_code in {401, 403} or code in {"1000", "1001", "1002", "1003", "1004"}:
@@ -1280,6 +1325,13 @@ class _GLMAsyncModels:
         if not endpoint.endswith("/chat/completions"):
             endpoint = f"{endpoint}/chat/completions"
 
+        remaining = is_model_cooling(model, endpoint)
+        if remaining > 0:
+            raise GlmRateLimitedError(
+                f"GLM model '{model}' is cooling down for another {remaining:.0f}s "
+                "after a rate-limit response; skipping request"
+            )
+
         payload = self._build_payload(model=model, contents=contents, config=config, kwargs=kwargs)
         headers = {
             "Authorization": f"Bearer {self._settings.GLM_API_KEY.get_secret_value()}",
@@ -1292,7 +1344,7 @@ class _GLMAsyncModels:
         ) as client:
             response = await client.post(endpoint, headers=headers, json=payload)
             if response.is_error:
-                self._log_glm_error(response)
+                self._log_glm_error(response, model, endpoint)
                 response.raise_for_status()
             data = response.json()
 

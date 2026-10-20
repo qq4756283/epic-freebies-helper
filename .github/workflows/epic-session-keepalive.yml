@@ -7,9 +7,10 @@ name: Epic Session Keepalive
 
 on:
   workflow_dispatch:
-  schedule:
-    # 每周二 UTC 03:00（北京时间 11:00），与周四主跑错开约两天半
-    - cron: '0 3 * * 2'
+  # 定时已停用：领取工作流改为每天运行，并自带纯 HTTP 令牌续期，会话不再依赖周中探活。
+  # 保留本工作流仅用于"手动诊断一次会话健康"。
+  # schedule:
+  #   - cron: '0 3 * * 2'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

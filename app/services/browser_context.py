@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import unquote, urlsplit
@@ -29,6 +30,11 @@ _PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
 # from cache without this marker never reached a verified session (cancelled or
 # crashed runs) and are wiped before launch instead of being trusted.
 PROFILE_HEALTH_MARKER = ".profile-ok"
+
+# Written only after a claim was verified on the current profile. It does not affect
+# ``ensure_healthy_profile`` (a profile with a valid login is still worth keeping); it exists so
+# post-mortems can tell "logged in but never claimed" apart from "logged in and claimed".
+PROFILE_VERIFIED_MARKER = ".profile-verified"
 
 # Points at the profile directory of the backend that is currently launching so
 # downstream services can persist health markers without knowing the backend.
@@ -64,6 +70,27 @@ def ensure_healthy_profile(profile_dir: Path) -> bool:
 
 def _mark_active_profile_dir(profile_dir: Path) -> None:
     os.environ[ACTIVE_PROFILE_DIR_ENV] = str(profile_dir)
+
+
+def mark_active_profile_verified(outcome: str) -> None:
+    """Stamp the active profile once a claim has been confirmed by the verify stage.
+
+    Purely observational. The ``.profile-ok`` marker keeps its original meaning ("this profile
+    reached a confirmed login"), because a valid session is worth reusing even when this run's
+    claim failed; wiping it would force a fresh login -- and a fresh hCaptcha -- next run.
+    """
+    profile_dir = os.getenv(ACTIVE_PROFILE_DIR_ENV)
+    if not profile_dir:
+        logger.debug("No active profile directory recorded; skipping verified marker")
+        return
+    try:
+        Path(profile_dir).joinpath(PROFILE_VERIFIED_MARKER).write_text(
+            f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} outcome={outcome}\n",
+            encoding="utf-8",
+        )
+        logger.info("Browser profile marked verified | dir={} | outcome={}", profile_dir, outcome)
+    except OSError as err:
+        logger.warning("Failed to write verified marker | error={!r}", err)
 
 
 def resolve_headless_mode(value: bool | str | None = None) -> bool | str:

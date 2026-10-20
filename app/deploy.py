@@ -13,6 +13,7 @@ using browser automation and scheduling capabilities.
 import asyncio
 import json
 import signal
+import time
 from contextlib import suppress
 from datetime import datetime
 
@@ -26,14 +27,25 @@ from services.epic_authorization_service import (
     EpicAuthorization,
     EpicManualActionRequiredError,
 )
-from services.browser_context import open_browser_context, resolve_headless_mode
+from services.browser_context import (
+    mark_active_profile_verified,
+    open_browser_context,
+    resolve_headless_mode,
+)
 from services.epic_collection_summary_service import collect_epic_games_with_summary
 from services.epic_games_service import EpicAgent, EpicFreeGameRateLimitError
 from services.run_outcome import (
     OUTCOME_BROWSER_CRASHED_EXHAUSTED,
     OUTCOME_MANUAL_ACTION_REQUIRED,
     OUTCOME_RATE_LIMITED,
+    RESULT_FAILED,
+    RESULT_OK,
+    RESULT_PARTIAL,
+    STAGE_AUTH,
+    STAGE_CLAIM,
+    STAGE_VERIFY,
     write_run_outcome,
+    write_stage_event,
 )
 from services.telegram_notification_service import (
     failure_summary_from_exception,
@@ -149,29 +161,63 @@ async def execute_browser_tasks(headless: bool | str = True, *, collect_summary:
         page = browser.pages[0] if browser.pages else await browser.new_page()
         logger.debug("Browser initialized successfully")
 
+        # --- AUTH -------------------------------------------------------------
         # Handle Epic Games authentication
         logger.debug("Initiating Epic Games authentication")
+        auth_started = time.monotonic()
         agent = EpicAuthorization(page)
         is_authenticated = await agent.invoke()
+        auth_ms = round((time.monotonic() - auth_started) * 1000, 1)
         if not is_authenticated:
-            write_run_outcome(agent.outcome_reason)
-            raise RuntimeError("Authentication failed, aborting this run")
+            write_stage_event(
+                STAGE_AUTH,
+                RESULT_FAILED,
+                agent.outcome_reason,
+                ms=auth_ms,
+                max_attempts=settings.AUTH_MAX_ATTEMPTS,
+            )
+            write_run_outcome(agent.outcome_reason, stage=STAGE_AUTH)
+            raise RuntimeError(
+                f"Authentication failed after {settings.AUTH_MAX_ATTEMPTS} attempt(s) "
+                f"({agent.outcome_reason}); nothing was claimed in this run"
+            )
+        write_stage_event(STAGE_AUTH, RESULT_OK, ms=auth_ms)
         logger.debug("Authentication completed")
 
+        # --- CLAIM (+ implicit VERIFY) ---------------------------------------
         # Execute a free games collection on new page
         logger.debug("Starting free games collection process")
+        claim_started = time.monotonic()
         game_page = await browser.new_page()
         agent = EpicAgent(game_page)
-        if collect_summary:
-            summary = await collect_epic_games_with_summary(agent)
-            write_run_outcome(
-                getattr(agent, "collection_outcome", "claimed_ok"),
-                detail="with Telegram summary",
+        try:
+            if collect_summary:
+                summary = await collect_epic_games_with_summary(agent)
+            else:
+                await agent.collect_epic_games()
+                summary = None
+        except Exception as err:
+            write_stage_event(
+                STAGE_CLAIM,
+                RESULT_FAILED,
+                f"{type(err).__name__}: {err}",
+                ms=round((time.monotonic() - claim_started) * 1000, 1),
             )
-        else:
-            await agent.collect_epic_games()
-            summary = None
-            write_run_outcome(getattr(agent, "collection_outcome", "claimed_ok"))
+            raise
+
+        claim_ms = round((time.monotonic() - claim_started) * 1000, 1)
+        collection_outcome = getattr(agent, "collection_outcome", "claimed_ok")
+        write_stage_event(
+            STAGE_CLAIM,
+            RESULT_OK if collection_outcome in ("claimed_ok", "all_already_owned") else RESULT_PARTIAL,
+            collection_outcome,
+            ms=claim_ms,
+            telegram_summary=collect_summary,
+        )
+        # The collection service only reports a terminal outcome after it re-reads the product
+        # page and the checkout state, so that label doubles as the verify result.
+        write_run_outcome(collection_outcome, stage=STAGE_VERIFY)
+        mark_active_profile_verified(collection_outcome)
         logger.debug("Free games collection completed")
 
         # Cleanup browser resources
@@ -201,11 +247,13 @@ async def execute_browser_tasks_with_notification(
         )
     except Exception as err:
         if isinstance(err, EpicManualActionRequiredError):
-            write_run_outcome(OUTCOME_MANUAL_ACTION_REQUIRED, str(err)[:200])
+            write_run_outcome(OUTCOME_MANUAL_ACTION_REQUIRED, str(err)[:200], stage=STAGE_AUTH)
         elif _is_free_game_rate_limit_error(err):
-            write_run_outcome(OUTCOME_RATE_LIMITED)
+            write_run_outcome(OUTCOME_RATE_LIMITED, stage=STAGE_CLAIM)
         elif _is_browser_crash_error(err):
-            write_run_outcome(OUTCOME_BROWSER_CRASHED_EXHAUSTED, str(err)[:200])
+            write_run_outcome(
+                OUTCOME_BROWSER_CRASHED_EXHAUSTED, str(err)[:200], stage=STAGE_CLAIM
+            )
         if notifications_enabled:
             await send_collection_summary_to_telegram(
                 failure_summary_from_exception(err), account_label=account_label
