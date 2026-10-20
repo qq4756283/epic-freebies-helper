@@ -2000,3 +2000,38 @@
     脚本自动写 secret；随后 `gh workflow run epic-gamer.yml` 即可验证下一次运行 0 验证码。
   - 验证限制：脚本的真实登录/铸造路径需要人工在浏览器里完成一次登录才能端到端验证，本地
     尚未执行（无交互条件）。静态检查：ruff（含 isort）、black --check、py_compile、`--check`。
+
+### 2026-10-21 免费视觉模型实测（新 Key）+ 模型路由定稿 + bootstrap 支持代理
+
+- 现象：
+  - 用户提供新的智谱标准 Key（`{id}.{secret}`）与三个免费视觉模型清单，需要确定仓库实际
+    使用的模型路由；此前仓库变量指向已失效的自建中转（`500 no account available`）。
+- 实测（`scripts/probe_llm_pool.py`，官方 `open.bigmodel.cn/api/paas/v4`，每模型 2 次网格题 +
+    1 次坐标题）：
+  - `glm-4.6v-flash`：1/2 成功，另 1 次 HTTP 429 `code=1305`（该模型当前访问量过大），
+    网格正确，坐标误差 81.5 / 271.8 px，延迟 p50 7.1 s。
+  - `glm-4.1v-thinking-flash`：2/2 成功，网格正确，坐标误差 65.9 / 279.6 px，延迟 p50 2.1 s。
+  - `glm-4v-flash`：2/2 成功，网格正确，延迟 p50 1.2 s（最省最快）。
+- 根因判断：
+  - 坐标类题型（拖拽/点选）三个模型的误差都在 66–280 px 量级，仍不可用；只能继续用本地 CV。
+  - 离散类题型（网格多选、二分类）免费模型足够；`glm-4.6v-flash` 规格最好但会被限流，只能
+    作为机会性模型，不能当默认。
+- 改动文件：
+  - 仓库配置（非文件）：secret `GLM_API_KEY_V2` = 新的标准 Key；变量
+    `GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4`、
+    `GLM_MODEL=glm-4.1v-thinking-flash`、
+    `IMAGE_CLASSIFIER_MODEL=glm-4v-flash`、`CHALLENGE_CLASSIFIER_MODEL=glm-4v-flash`、
+    `SPATIAL_POINT_REASONER_MODEL=glm-4.1v-thinking-flash`、
+    `SPATIAL_PATH_REASONER_MODEL=glm-4.1v-thinking-flash`。
+  - `scripts/bootstrap_refresh_token.py`：新增 `--proxy`（默认读 `BOOTSTRAP_PROXY`），因为本机
+    直连 `store.epicgames.com` 会 45 s 超时，必须能指定线路；`_open_context` 现在把 proxy 传给
+    persistent context。
+- 处理结果：
+  - 模型层从此有实测依据：离散题走 `glm-4v-flash`（快）/`glm-4.1v-thinking-flash`（准），
+    坐标题一律本地 CV，`glm-4.6v-flash` 仅在未限流时兜底。
+  - 连续 6 次云端运行（39474484991 → 39490716758）证明验证码**能解**（多次 `Challenge success`），
+    但 Epic 侧登录结果不稳定：`Timed out waiting for Epic login outcome` 与
+    `captcha_invalid` 交替出现，且在 `AUTH_MAX_ATTEMPTS=3` 内未拿到可用会话。
+- 验证限制：
+  - 登录成功后的"铸造令牌 → 同上下文播种 → 领取"闭环仍未跑通一次；本机直连商店超时，
+    bootstrap 的人工登录路径需用户在浏览器里手动完成一次。

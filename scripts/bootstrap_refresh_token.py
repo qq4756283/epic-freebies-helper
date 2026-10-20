@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -98,8 +99,9 @@ def _set_secret(token: str) -> bool:
     return True
 
 
-async def _open_context(playwright):
+async def _open_context(playwright, proxy: str | None = None):
     """Prefer a real Chrome/Edge install; those produce far fewer hCaptcha prompts."""
+    proxy_opts = {"server": proxy} if proxy else None
     attempts: list[tuple[str, dict]] = [
         ("chrome (system)", {"channel": "chrome"}),
         ("msedge (system)", {"channel": "msedge"}),
@@ -109,25 +111,28 @@ async def _open_context(playwright):
     errors: list[str] = []
     for label, kwargs in attempts:
         try:
+            launch: dict = {
+                "headless": False,
+                "viewport": {"width": 1280, "height": 900},
+            }
+            if proxy_opts:
+                launch["proxy"] = proxy_opts
             if kwargs.get("browser") == "firefox":
                 context = await playwright.firefox.launch_persistent_context(
-                    str(PROFILE_DIR), headless=False, viewport={"width": 1280, "height": 900}
+                    str(PROFILE_DIR), **launch
                 )
             elif kwargs.get("browser") == "chromium":
                 context = await playwright.chromium.launch_persistent_context(
-                    str(PROFILE_DIR), headless=False, viewport={"width": 1280, "height": 900}
+                    str(PROFILE_DIR), **launch
                 )
             else:
                 context = await playwright.chromium.launch_persistent_context(
-                    str(PROFILE_DIR),
-                    headless=False,
-                    viewport={"width": 1280, "height": 900},
-                    channel=kwargs["channel"],
+                    str(PROFILE_DIR), channel=kwargs["channel"], **launch
                 )
         except Exception as err:
             errors.append(f"{label}: {type(err).__name__}: {str(err)[:120]}")
             continue
-        print(f"  ✓ browser: {label}")
+        print(f"  ✓ browser: {label}" + (f" | proxy={proxy}" if proxy else " | direct"))
         return context
     print("  ! no browser could be launched:")
     for line in errors:
@@ -179,7 +184,7 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"state   : {session_vault.STATE_PATH}")
 
     async with async_playwright() as playwright:
-        context = await _open_context(playwright)
+        context = await _open_context(playwright, proxy=(args.proxy or None))
         if context is None:
             return 3
         try:
@@ -273,6 +278,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="login wait (s)")
     parser.add_argument("--no-secret", action="store_true", help="do not touch gh secrets")
     parser.add_argument("--yes", action="store_true", help="do not prompt before setting secret")
+    parser.add_argument(
+        "--proxy",
+        default=os.getenv("BOOTSTRAP_PROXY", ""),
+        help="HTTP(S) proxy for the bootstrap browser, e.g. http://127.0.0.1:10808",
+    )
     args = parser.parse_args(argv)
 
     if args.check:
