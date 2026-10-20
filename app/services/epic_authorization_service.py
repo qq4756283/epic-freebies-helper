@@ -601,6 +601,13 @@ class EpicAuthorization:
 
             await self.page.wait_for_timeout(500)
 
+        # A solved captcha regularly lands without the in-page success signal, which is why
+        # several runs logged "Challenge success" and then timed out. The account API is the
+        # ground truth: if it answers, this attempt did log in.
+        if await session_vault.load_order_history(self.page.context) is not None:
+            logger.success("Login confirmed via the account API after a solved challenge")
+            return
+
         raise PlaywrightTimeoutError("Timed out waiting for Epic login outcome")
 
     async def _replace_page(self) -> None:
