@@ -358,30 +358,39 @@ async def try_seed(context: Any) -> bool:
 
 async def _seed(context: Any, token: str) -> bool:
     codes: list[str] = []
-    # Web client first: id/api/exchange only accepts codes issued for it. The launcher
-    # client stays as a second attempt so a client-id change on Epic's side degrades
-    # instead of breaking outright.
+    # Two dimensions matter here and both were wrong in the first attempt:
+    #  * id/api/exchange only accepts codes issued for the web client;
+    #  * id/api/redirect is issued for the *cookie* session, and adding a bearer header
+    #    makes it answer 400 "authorization is invalid" even for a valid token.
+    # So try cookie-session first, then bearer, for the web client, then the launcher.
     for client_id in (WEB_CLIENT_ID, LAUNCHER_CLIENT_ID):
-        redirect = await context.request.get(
-            WEB_REDIRECT_URL,
-            params={"clientId": client_id, "responseType": "code"},
-            headers={"Authorization": f"bearer {token}"},
-            timeout=HTTP_TIMEOUT_SECONDS * 1000,
-        )
-        if redirect.status != 200:
-            logger.warning(
-                "Session vault: seed redirect rejected | client={} | status={} | body={}",
-                client_id,
-                redirect.status,
-                await _api_text(redirect),
+        for auth_header in ({}, {"Authorization": f"bearer {token}"}):
+            redirect = await context.request.get(
+                WEB_REDIRECT_URL,
+                params={"clientId": client_id, "responseType": "code"},
+                headers=auth_header,
+                timeout=HTTP_TIMEOUT_SECONDS * 1000,
             )
-            continue
-        code = ((await _api_json(redirect)) or {}).get("authorizationCode")
-        if not code:
-            logger.warning("Session vault: seed redirect returned no authorizationCode")
-            continue
-        logger.info("Session vault: authorization code issued | client={}", client_id)
-        codes.append(code)
+            if redirect.status != 200:
+                logger.warning(
+                    "Session vault: seed redirect rejected | client={} | auth_header={} | "
+                    "status={} | body={}",
+                    client_id,
+                    bool(auth_header),
+                    redirect.status,
+                    await _api_text(redirect),
+                )
+                continue
+            code = ((await _api_json(redirect)) or {}).get("authorizationCode")
+            if not code:
+                logger.warning("Session vault: seed redirect returned no authorizationCode")
+                continue
+            logger.info(
+                "Session vault: authorization code issued | client={} | auth_header={}",
+                client_id,
+                bool(auth_header),
+            )
+            codes.append(code)
 
     if not codes:
         return False

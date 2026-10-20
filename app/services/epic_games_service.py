@@ -189,6 +189,7 @@ class EpicAgent:
         deadline = time.monotonic() + timeout_seconds
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
+        false_rounds = 0
 
         while time.monotonic() < deadline:
             if self._needs_privacy_policy_correction():
@@ -200,8 +201,23 @@ class EpicAgent:
                 raise EpicManualActionRequiredError(self._mfa_setup_prompt_message(self.page.url))
 
             status = await self._get_login_status(timeout_ms=1500)
-            if status in {"true", "false"}:
-                return status
+            if status == "true":
+                return "true"
+
+            if status == "false":
+                # The storefront marker is a client-side flag and lags behind the account
+                # session: run 39486291763 logged in successfully, minted a token, and was
+                # still rejected here. Trust the account API over the marker, but only for
+                # one round so a genuinely logged-out context is not retried forever.
+                false_rounds += 1
+                if false_rounds == 1 and await self._has_account_session():
+                    logger.warning(
+                        "Store marker says isloggedin=false but the account session is valid; "
+                        "continuing with the account session"
+                    )
+                    return "true"
+                if false_rounds >= 2:
+                    return "false"
 
             if not account_probe_attempted and time.monotonic() >= account_probe_at:
                 account_probe_attempted = True

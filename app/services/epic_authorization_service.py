@@ -724,13 +724,23 @@ class EpicAuthorization:
                     handshake_attempted = True
                     logger.warning(
                         "Epic store reports isloggedin=false after a successful login; "
-                        "running the session vault handshake (mint + seed) and reloading"
+                        "running the store login handoff, then the session vault handshake"
                     )
+                    # The account session can be valid while the storefront still has no
+                    # session. The store's own /login URL bounces through the account
+                    # service and completes the handoff without a second captcha.
+                    with suppress(Exception):
+                        await self.page.goto(
+                            "https://store.epicgames.com/en-US/login",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await self.page.wait_for_timeout(3000)
                     minted = await session_vault.mint_from_context(self.page.context)
                     if minted:
                         await session_vault.try_seed(self.page.context)
-                    await self.page.reload(wait_until="domcontentloaded")
-                    await self.page.wait_for_timeout(2000)
+                    await self._goto_claim_page()
+                    await self.page.wait_for_timeout(1500)
                     continue
 
                 if false_rounds >= 3:
