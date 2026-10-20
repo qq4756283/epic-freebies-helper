@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -280,6 +281,28 @@ async def _api_text(response: Any, limit: int = 200) -> str:
     return (text or "")[:limit]
 
 
+def _extract_code(payload: dict[str, Any] | None) -> str | None:
+    """Pull an authorization code out of either response shape.
+
+    ``id/api/redirect`` answers ``{"authorizationCode": ...}`` only in some contexts; the
+    cookie-session variant answers ``{"redirectUrl": ".../callback?code=..."}``, which is
+    why a strict ``authorizationCode`` lookup returned nothing and seeding silently died.
+    """
+    if not payload:
+        return None
+    direct = payload.get("authorizationCode")
+    if isinstance(direct, str) and direct:
+        return direct
+    for key in ("redirectUrl", "redirect_url", "url", "location"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        match = re.search(r"[?&]code=([^&#]+)", value)
+        if match:
+            return match.group(1)
+    return None
+
+
 async def mint_from_context(context: Any) -> bool:
     """Mint a refresh token from an already logged-in browser context.
 
@@ -309,7 +332,7 @@ async def _mint(context: Any) -> bool:
         )
         return False
 
-    code = ((await _api_json(redirect)) or {}).get("authorizationCode")
+    code = _extract_code(await _api_json(redirect))
     if not code:
         logger.warning("Session vault: mint redirect returned no authorizationCode")
         return False
@@ -381,7 +404,7 @@ async def _seed(context: Any, token: str) -> bool:
                     await _api_text(redirect),
                 )
                 continue
-            code = ((await _api_json(redirect)) or {}).get("authorizationCode")
+            code = _extract_code(await _api_json(redirect))
             if not code:
                 logger.warning("Session vault: seed redirect returned no authorizationCode")
                 continue
