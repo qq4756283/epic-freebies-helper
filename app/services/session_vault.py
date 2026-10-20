@@ -82,6 +82,26 @@ def _basic_auth() -> httpx.BasicAuth:
     return httpx.BasicAuth(LAUNCHER_CLIENT_ID, LAUNCHER_CLIENT_SECRET)
 
 
+def _proxy_url() -> str | None:
+    """Explicit proxy only.
+
+    ``trust_env`` is disabled on purpose: a stale or duplicated ``HTTP_PROXY`` in the
+    environment surfaces as ``InvalidURL("Invalid port")`` and would look like an Epic
+    outage. Operators who need a proxy set ``EPIC_HTTP_PROXY``.
+    """
+    value = (os.getenv("EPIC_HTTP_PROXY") or "").strip()
+    return value or None
+
+
+def _client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        trust_env=False,
+        proxy=_proxy_url(),
+    )
+
+
 # --- state file ----------------------------------------------------------------
 def read_state() -> dict[str, Any]:
     """Return the persisted session state, or an empty dict when unavailable."""
@@ -178,7 +198,7 @@ async def refresh_access_token() -> str | None:
         "token_type": "eg1",
     }
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        async with _client() as client:
             response = await client.post(OAUTH_TOKEN_URL, data=payload, auth=_basic_auth())
     except Exception as err:  # network/proxy/DNS — never fatal for the run
         logger.warning("Session vault: refresh request failed | error={!r}", err)
@@ -259,7 +279,7 @@ async def mint_from_context(context: Any) -> bool:
         "token_type": "eg1",
     }
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        async with _client() as client:
             token_response = await client.post(OAUTH_TOKEN_URL, data=payload, auth=_basic_auth())
     except Exception as err:
         logger.warning("Session vault: code exchange failed | error={!r}", err)
