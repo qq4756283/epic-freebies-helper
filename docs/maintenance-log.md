@@ -1941,3 +1941,33 @@
     `py_compile`，并对 `session_vault` 的 14 项无网络行为（无令牌短路、令牌持久化、401 降级、
     非 JSON 订单响应降级、状态清除）做了本地 smoke 校验，全部通过。真实链路需由首次 Actions
     运行验证，日志里应出现 `Session vault: token stored` 与后续 `session seeded from token`。
+
+### 2026-10-21 修 Session vault 的协程误用 + 把仓库模型端点切回官方（首次真机验证）
+
+- 现象：
+  - 手动 dispatch 运行 39474484991：`Session vault: no usable token` 后登录失败，3 次尝试后
+    `auth_failed_captcha`；日志里 `GLM request failed | status=500 | body={"error":{"message":"no account available"}}`
+    连续出现——模型端点是 `http://115.120.244.178:5242/v1`（明文自建中转），该中转已无可用账号。
+  - 修端点后运行 39476988894：登录第 3 次成功（`Epic account session verified via order history
+    endpoint`），紧接着进程以 `AttributeError: 'coroutine' object has no attribute 'get'` 退出。
+- 根因判断：
+  - 仓库变量 `GLM_BASE_URL` / `GLM_MODEL` 仍指向那个已失效的中转站，等于验证码求解器没有可用
+    模型；这不是代码问题，是配置问题，任何求解算法改进都无效。
+  - Playwright 的 `APIResponse.json()` / `text()` 是协程。`session_vault` 当成同步值使用：
+    `mint_from_context` 里 `(response.json() or {}).get(...)` 立刻抛 AttributeError，把刚登录成功的
+    运行直接打死；`load_order_history` 则静默失效（协程不是 dict），于是又退回旧的页面抓取路径。
+- 改动文件：
+  - `app/services/session_vault.py`：新增 `_api_json()` / `_api_text()` 正确 await；`mint_from_context`
+    与 `try_seed` 拆成"薄壳 + 内部实现"，薄壳 try/except 兜底，保证会话维护永不打断运行；
+    `load_order_history` 同样改用 `_api_json`。
+  - `scripts/smoke_session_vault.py`：假响应对象改为 async json/text，与新实现语义一致。
+  - 仓库配置（非文件）：`GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4`、
+    `GLM_MODEL=glm-4.1v-thinking-flash`、`SPATIAL_POINT_REASONER_MODEL=glm-4.1v-thinking-flash`；
+    新增 secret `GLM_API_KEY_V2`（工作流优先读取它，旧 `GLM_API_KEY` 保留不动）。
+- 处理结果：
+  - 官方端点用本地 key 实测 HTTP 200、正确返回 `{"ok":true}`（`scripts/probe_glm_key.py`）。
+  - 登录链路出现首个正向信号：`already logged in` 之外的路径也能拿到可用会话，且订单历史
+    探测首次返回成功（此前每轮 `JSONDecodeError`）。
+  - 验证限制：尚未完成一次端到端"登录→铸造令牌→下次运行 0 验证码→领取成功"的闭环；下一次
+    运行应出现 `Session vault: token stored | source=browser_login`，再下一次应出现
+    `session seeded from token` 且不出现登录页。

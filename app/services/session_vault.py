@@ -236,6 +236,28 @@ async def access_token() -> str | None:
 
 
 # --- browser side ---------------------------------------------------------------
+async def _api_json(response: Any) -> dict[str, Any] | None:
+    """Read a Playwright APIResponse body as JSON.
+
+    ``APIResponse.json()`` is a coroutine; treating it as a dict raises
+    ``AttributeError: 'coroutine' object has no attribute 'get'`` and once killed a run
+    right after a successful login.
+    """
+    try:
+        data = await response.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _api_text(response: Any, limit: int = 200) -> str:
+    try:
+        text = await response.text()
+    except Exception:
+        return ""
+    return (text or "")[:limit]
+
+
 async def mint_from_context(context: Any) -> bool:
     """Mint a refresh token from an already logged-in browser context.
 
@@ -244,46 +266,35 @@ async def mint_from_context(context: Any) -> bool:
     """
     if not enabled():
         return False
-
     try:
-        response = await context.request.get(
-            WEB_REDIRECT_URL,
-            params={"clientId": LAUNCHER_CLIENT_ID, "responseType": "code"},
-            timeout=HTTP_TIMEOUT_SECONDS * 1000,
-        )
-    except Exception as err:
-        logger.warning("Session vault: mint redirect failed | error={!r}", err)
+        return await _mint(context)
+    except Exception as err:  # session housekeeping must never abort a run
+        logger.warning("Session vault: mint aborted | error={!r}", err)
         return False
 
-    if response.status != 200:
+
+async def _mint(context: Any) -> bool:
+    redirect = await context.request.get(
+        WEB_REDIRECT_URL,
+        params={"clientId": LAUNCHER_CLIENT_ID, "responseType": "code"},
+        timeout=HTTP_TIMEOUT_SECONDS * 1000,
+    )
+    if redirect.status != 200:
         logger.warning(
             "Session vault: mint redirect rejected | status={} | body={}",
-            response.status,
-            (response.text() or "")[:200],
+            redirect.status,
+            await _api_text(redirect),
         )
         return False
 
-    try:
-        code = (response.json() or {}).get("authorizationCode")
-    except ValueError:
-        logger.warning("Session vault: mint redirect response was not JSON")
-        return False
-
+    code = ((await _api_json(redirect)) or {}).get("authorizationCode")
     if not code:
         logger.warning("Session vault: mint redirect returned no authorizationCode")
         return False
 
-    payload = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "token_type": "eg1",
-    }
-    try:
-        async with _client() as client:
-            token_response = await client.post(OAUTH_TOKEN_URL, data=payload, auth=_basic_auth())
-    except Exception as err:
-        logger.warning("Session vault: code exchange failed | error={!r}", err)
-        return False
+    payload = {"grant_type": "authorization_code", "code": code, "token_type": "eg1"}
+    async with _client() as client:
+        token_response = await client.post(OAUTH_TOKEN_URL, data=payload, auth=_basic_auth())
 
     if token_response.status_code != 200:
         logger.warning(
@@ -317,49 +328,42 @@ async def try_seed(context: Any) -> bool:
         return False
 
     try:
-        redirect = await context.request.get(
-            WEB_REDIRECT_URL,
-            params={"clientId": LAUNCHER_CLIENT_ID, "responseType": "code"},
-            headers={"Authorization": f"bearer {token}"},
-            timeout=HTTP_TIMEOUT_SECONDS * 1000,
-        )
+        return await _seed(context, token)
     except Exception as err:
-        logger.warning("Session vault: seed redirect failed | error={!r}", err)
+        logger.warning("Session vault: seed aborted | error={!r}", err)
         return False
 
+
+async def _seed(context: Any, token: str) -> bool:
+    redirect = await context.request.get(
+        WEB_REDIRECT_URL,
+        params={"clientId": LAUNCHER_CLIENT_ID, "responseType": "code"},
+        headers={"Authorization": f"bearer {token}"},
+        timeout=HTTP_TIMEOUT_SECONDS * 1000,
+    )
     if redirect.status != 200:
         logger.warning(
             "Session vault: seed redirect rejected | status={} | body={}",
             redirect.status,
-            (redirect.text() or "")[:200],
+            await _api_text(redirect),
         )
         return False
 
-    try:
-        code = (redirect.json() or {}).get("authorizationCode")
-    except ValueError:
-        logger.warning("Session vault: seed redirect response was not JSON")
-        return False
-
+    code = ((await _api_json(redirect)) or {}).get("authorizationCode")
     if not code:
         logger.warning("Session vault: seed redirect returned no authorizationCode")
         return False
 
-    try:
-        exchange = await context.request.get(
-            WEB_EXCHANGE_URL,
-            params={"code": code},
-            timeout=HTTP_TIMEOUT_SECONDS * 1000,
-        )
-    except Exception as err:
-        logger.warning("Session vault: cookie exchange failed | error={!r}", err)
-        return False
-
+    exchange = await context.request.get(
+        WEB_EXCHANGE_URL,
+        params={"code": code},
+        timeout=HTTP_TIMEOUT_SECONDS * 1000,
+    )
     if exchange.status >= 400:
         logger.warning(
             "Session vault: cookie exchange rejected | status={} | body={}",
             exchange.status,
-            (exchange.text() or "")[:200],
+            await _api_text(exchange),
         )
         return False
 
@@ -404,19 +408,18 @@ async def load_order_history(context: Any) -> dict[str, Any] | None:
         logger.warning(
             "Order history request returned status={} | body={}",
             response.status,
-            (response.text() or "")[:160],
+            await _api_text(response, 160),
         )
         return None
 
-    try:
-        payload = response.json()
-    except ValueError:
+    payload = await _api_json(response)
+    if payload is None:
         logger.warning(
-            "Order history response was not JSON | body={}", (response.text() or "")[:160]
+            "Order history response was not JSON | body={}", await _api_text(response, 160)
         )
         return None
 
-    if not isinstance(payload, dict) or not isinstance(payload.get("orders"), list):
+    if not isinstance(payload.get("orders"), list):
         logger.warning("Order history payload did not contain an orders list")
         return None
     return payload
