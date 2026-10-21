@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       attempts:
-        description: 'single-run login attempts (1-5)'
+        description: 'single-run login attempts (1-5; keep at 1 to avoid risk escalation)'
         required: false
-        default: '5'
+        default: '1'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -94,7 +94,7 @@ jobs:
           DISABLE_BEZIER_TRAJECTORY: false
           ENABLE_APSCHEDULER: false
           AUTH_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.AUTH_ATTEMPT_TIMEOUT_SECONDS || '240' }}
-          AUTH_MAX_ATTEMPTS: ${{ inputs.attempts || '5' }}
+          AUTH_MAX_ATTEMPTS: ${{ inputs.attempts || '1' }}
           MPLBACKEND: Agg
           PYTHONPATH: app
         run: |

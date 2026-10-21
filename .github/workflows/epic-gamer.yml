@@ -155,9 +155,10 @@ jobs:
           # 在 Actions 中我们依靠 GitHub 的 cron 触发，所以关闭内部调度器
           ENABLE_APSCHEDULER: false
           AUTH_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.AUTH_ATTEMPT_TIMEOUT_SECONDS || '240' }}
-          # 3 次足够：连续 3 次登录失败几乎必然是 IP/身份问题，继续重试只会抬高风控分
-          # 并把 15 分钟的失败拖成 20 分钟。详见 docs/refactor-plan-2026-10.md §4.4。
-          AUTH_MAX_ATTEMPTS: ${{ vars.AUTH_MAX_ATTEMPTS || '3' }}
+          # 每次运行只试 1 次：同账号连续重试会把 Epic 的风险分推高（2026-10-21 实测：
+          # 几小时内 15 次尝试，把「12 次里成 2 次」压到「10 次全灭」）。重试交给"每天一次"
+          # 的调度，而不是压在同一轮里。详见 docs/direction-2026-10-v3.md。
+          AUTH_MAX_ATTEMPTS: ${{ vars.AUTH_MAX_ATTEMPTS || '1' }}
           MPLBACKEND: Agg
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PYTHONPATH: app
