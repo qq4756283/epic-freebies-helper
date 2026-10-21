@@ -2035,3 +2035,43 @@
 - 验证限制：
   - 登录成功后的"铸造令牌 → 同上下文播种 → 领取"闭环仍未跑通一次；本机直连商店超时，
     bootstrap 的人工登录路径需用户在浏览器里手动完成一次。
+
+### 2026-10-22 打通：本地 CV 解"最高的塔"题型 → 登录成功 → 会话复用（0 验证码）
+
+- 现象（打通前）：
+  - 云端登录连续失败：`image_label_multi_select` 的题目是"点击最矮的两座塔"，模型把答案写成散文
+    （`GLM structured parse failed | raw_text=Based on the image showing five towers...`），
+    回退后点了同一行的两个错误坐标，Epic 判失败并重发挑战；单次尝试里挑战被重发 19 次，
+    最终 `Timed out waiting for Epic login outcome`。
+  - 2026-10-21 累计 15 次登录尝试：早上 12 次成 2 次，下午 10 次全灭——风险分被自己推高。
+- 根因判断：
+  - 高度排序题是纯几何题（比较竖条高度），视觉模型无法定位坐标（实测误差 66–280 px），
+    而本地 CV 可以精确回答；此前该题型没有本地分支，只能走模型。
+  - 另外两处会"毁掉已建立的会话"：重试时无脑清 cookie、登录成功后立刻导航打断
+    `accounts.epicgames.com/auth/callback` 重定向链。
+- 改动文件：
+  - `app/extensions/hcaptcha_adapter.py`：新增 `_parse_height_question()` 与
+    `_solve_height_ranking()`——按列切分竖条、测量每列墨迹高度、按需取最矮/最高的 N 个并点击；
+    先裁掉画布边框（边框线贯穿所有列，会让所有物体等高、排序变成掷硬币）。命中该题型时
+    完全跳过模型调用。
+  - `app/services/epic_authorization_service.py`：登录后等待重定向链落到 store 域
+    （`_settle_after_login`）；store 标记为 false 时先做 store 登录 handoff + 令牌握手；
+    `invoke()` 先查账户 API 再决定是否走登录表单；重试不再清 cookie；最终失败前再兜一次账户 API。
+  - `app/services/session_vault.py`：seed 探测改为"cookie 会话 / bearer × web/launcher client"，
+    并从 `redirectUrl` 里解析授权码；`refresh_access_token()` 支持被拒后用 `EPIC_REFRESH_TOKEN` 重试。
+  - `.github/workflows/epic-gamer.yml`：四个 cron 槽位 + `scripts/gate.py` 闸门（本周已领或今天
+    已试过登录则空转）；`AUTH_MAX_ATTEMPTS` 默认 1；scoreboard 每次运行都提交（闸门的记忆来源）。
+  - `scripts/gate.py`、`scripts/login_only.py`、`.github/workflows/epic-login-bootstrap.yml`
+    （只登录不领取的引导工作流）、`docs/scoreboard.json`（种子文件）。
+- 处理结果（实测）：
+  - 运行 `39646083969`：`Challenge success` ×2 → `Login success` → store 标记 false →
+    handoff → **`Session vault: token stored | source=browser_login | expires_in=129600s`** →
+    领取阶段两个商品 `In Library` → `already_owned=2` → `all_already_owned` → success（3m47s）。
+  - 紧接着运行 `39646790863`：`Session vault` 播种失败（`id/api/exchange` 已 404）但
+    **`Epic Games is already logged in` 直接命中缓存会话**，全程 0 次验证码，2m28s，success。
+  - 结论：一次登录成功后会话被保留并复用，"每周必出验证码"的循环被打断。
+- 残留问题：
+  - `id/api/exchange` 返回 404（Epic 端点变更），token → cookie 播种不可用；当前依赖浏览器
+    profile 的 cookie 缓存，会话一旦自然过期仍需再登录一次（有本地 CV 解题器后成功率显著提高）。
+  - 订单历史 JSON 请求被 Cloudflare 403（浏览器指纹不足），已回退页面抓取；`already_owned`
+    判定不受影响，但"订单级证据"仍缺一层。
