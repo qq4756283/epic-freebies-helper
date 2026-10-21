@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "at": "2026-10-21T17:24:14Z",
+    "run_id": "39642651434",
+    "event": "workflow_dispatch",
+    "outcome": "auth_failed_captcha",
+    "stage": "auth",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "failed",
+        "ms": 251633.1,
+        "max_attempts": 1
+      }
+    ],
+    "session": {
+      "source": "browser_login",
+      "has_refresh_token": true
+    }
+  }
+]
