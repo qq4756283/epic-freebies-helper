@@ -696,7 +696,38 @@ class EpicAuthorization:
             logger.warning("Failed to verify Epic account session via order history: {!r}", err)
             return False
 
+    async def _settle_after_login(self, timeout_seconds: int = 30) -> None:
+        """Let the post-login redirect chain finish before judging the store session.
+
+        The password flow ends on ``accounts.epicgames.com/auth/callback`` and the store
+        session is created by that redirect chain (it exchanges the code server-side).
+        Navigating to the store immediately after the in-page success signal interrupts it,
+        which is the most likely reason logged-in runs still saw ``isloggedin=false``.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            url = self.page.url or ""
+            if "store.epicgames.com" in url:
+                await self.page.wait_for_timeout(1500)
+                return
+            await self.page.wait_for_timeout(500)
+
+        logger.warning(
+            "Post-login redirect did not reach the store (current_url='{}'); "
+            "forcing the store login handoff",
+            self.page.url,
+        )
+        with suppress(Exception):
+            await self.page.goto(
+                "https://store.epicgames.com/en-US/login",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_timeout(2500)
+
     async def _ensure_store_session_ready(self, timeout_seconds: int = 45) -> None:
+        await self._settle_after_login()
+
         deadline = time.monotonic() + timeout_seconds
         account_probe_at = time.monotonic() + 8
         account_probe_attempted = False
@@ -895,6 +926,10 @@ class EpicAuthorization:
                 raise
             return None
 
+    async def _account_session_ok(self) -> bool:
+        """Ground-truth login check that does not depend on the storefront marker."""
+        return await session_vault.load_order_history(self.page.context) is not None
+
     async def invoke(self) -> bool:
         self.page.on("response", self._on_response_anything)
         self._totp_attempts = 0
@@ -924,8 +959,19 @@ class EpicAuthorization:
                 self.outcome_reason = "manual_action_required"
                 return False
 
-            if "true" == await self._get_login_status():
+            if "true" == await self._get_login_status(timeout_ms=3000, warn_timeout=False):
                 logger.success("Epic Games is already logged in")
+                self._mark_profile_healthy()
+                await session_vault.ensure_state(self.page.context)
+                return True
+
+            # A cached profile can hold valid account cookies while the storefront marker
+            # still reads false. Probe the account API before paying for a login attempt:
+            # the password form is readonly in that state, so logging in would just fail.
+            if await self._account_session_ok():
+                logger.success(
+                    "Epic account session verified via the account API; skipping the login form"
+                )
                 self._mark_profile_healthy()
                 await session_vault.ensure_state(self.page.context)
                 return True
