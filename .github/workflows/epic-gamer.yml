@@ -2,20 +2,47 @@ name: Epic Awesome Gamer (Scheduled)
 
 on:
   workflow_dispatch: # 手动触发
+    inputs:
+      force:
+        description: 'ignore the gate (run even if already claimed today)'
+        required: false
+        default: '0'
   schedule:
-    # 每天一次（北京时间 00:30，位于 Epic 周四 15:00 UTC 刷新之后）。
-    #
-    # 为什么不是"每周四/五/六/日各一次"：GitHub 的 schedule 会静默丢触发——本仓库
-    # 2026-10-14 起连续 8 天 0 触发，而 workflow 仍是 active。每天一次 + 运行前先做
-    # 一次"只读真值预检"（已领完就 20 秒退出、不启浏览器、不出验证码），等价于把
-    # 每周 1 次机会变成每周 7 次，且成本不变。详见 docs/direction-2026-10-v3.md §5。
-    - cron: '30 16 * * *'
+    # 一天四个槽位 + 一个闸门：GitHub 的 schedule 会静默丢触发——本仓库 2026-10-14 起
+    # 连续 8 天 0 触发，2026-10-21 的日槽位又丢了一次，而 workflow 始终是 active。
+    # 所以用"多槽位冗余"，再由 scripts/gate.py 决定这次到底要不要干活：
+    #   · 本周已验证领取 → 跳过（无事可做）
+    #   · 今天已经试过登录 → 跳过（连续重试会抬高 Epic 风险分，2026-10-21 实测）
+    # 净效果：调度有很多次机会，真正登录仍然一天最多一次。
+    - cron: '30 16 * * *'   # 北京 00:30
+    - cron: '30 20 * * *'   # 北京 04:30
+    - cron: '30 0 * * *'    # 北京 08:30
+    - cron: '30 8 * * *'    # 北京 16:30
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.repository != 'Ronchy2000/epic-freebies-helper'
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # 纯标准库，10 秒内给出"这次要不要干活"的结论，让多余的调度槽位变成空转。
+      - name: Decide whether this slot should do anything
+        id: gate
+        env:
+          GATE_FORCE: ${{ inputs.force }}
+        run: python3 scripts/gate.py
+
   epic-gamer:
+    needs: gate
+    if: needs.gate.outputs.run == 'yes'
     runs-on: ubuntu-latest
     # A single account run can take 15-20 minutes. Multi-account runs are
     # sequential, so scale the timeout with the number of accounts by setting
@@ -24,9 +51,6 @@ jobs:
     timeout-minutes: ${{ fromJSON(vars.JOB_TIMEOUT_MINUTES || '60') }}
     permissions:
       contents: write
-
-    # 默认不在主仓库自身执行定时任务；Fork 后的仓库会正常运行。
-    if: github.repository != 'Ronchy2000/epic-freebies-helper'
 
     steps:
       - name: Checkout repository
@@ -287,8 +311,9 @@ jobs:
               ;;
           esac
 
-      # 每周一行账：既是最省事的"这周到底领到没有"的证据，也是仓库保活（GitHub 会停用
-      # 长期无提交仓库的 schedule）。写失败不影响本次领取结论。
+      # 每次运行都落一行账：这是闸门（scripts/gate.py）唯一的记忆来源——它靠这份记录
+      # 判断"本周是否已领""今天是否已试过登录"。同时让仓库保持活跃（GitHub 会停用长期
+      # 无提交仓库的 schedule）。写失败不影响领取结论。
       - name: Append scoreboard record
         if: always()
         continue-on-error: true
@@ -296,15 +321,6 @@ jobs:
           PYTHONPATH: app
         run: |
           uv run python scripts/scoreboard.py
-          OUTCOME=""
-          if [ -f app/volumes/runtime/run-outcome.json ]; then
-            OUTCOME=$(sed -n 's/.*"outcome"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' app/volumes/runtime/run-outcome.json | head -n1)
-          fi
-          # 只在"真的领到了"或每周一提交一次，避免每天一条噪音提交；已足够让仓库保持活跃。
-          if [ "$OUTCOME" != "claimed_ok" ] && [ "$(date -u +%u)" != "1" ]; then
-            echo "scoreboard: commit skipped (outcome=${OUTCOME:-none}, weekday=$(date -u +%u))"
-            exit 0
-          fi
           git config user.name "epic-freebies-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/scoreboard.json
