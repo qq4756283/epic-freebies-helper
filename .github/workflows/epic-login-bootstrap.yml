@@ -1,0 +1,144 @@
+name: Epic Login Bootstrap
+
+# 只做一件事：把浏览器会话撞出来（成功后自动铸造 refresh_token 并回存可信缓存）。
+#
+# 为什么单独一个工作流：领取流程一次要 12 分钟，而当前缺的只是一个有效会话。
+# 这个工作流每次约 6-8 分钟，失败不写 ok 缓存，成功后主领取流程直接命中会话。
+#
+# 触发：手动 dispatch（可反复触发），或由本机脚本循环触发直到成功。
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempts:
+        description: 'single-run login attempts (1-5)'
+        required: false
+        default: '5'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    if: github.repository != 'Ronchy2000/epic-freebies-helper'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Restore Epic browser session
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            app/volumes/user_data
+            app/volumes/runtime/session-state.json
+          key: epic-session-ok-${{ github.run_id }}
+          restore-keys: |
+            epic-session-ok-
+            epic-session-last-
+            epic-session-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 xvfb libxml2-dev libxslt-dev
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Camoufox
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run camoufox fetch
+
+      - name: Install Playwright Firefox fallback
+        run: uv run playwright install firefox
+
+      - name: Login only
+        env:
+          EPIC_EMAIL: ${{ secrets.EPIC_EMAIL }}
+          EPIC_PASSWORD: ${{ secrets.EPIC_PASSWORD }}
+          EPIC_ACCOUNTS: ${{ secrets.EPIC_ACCOUNTS }}
+          EPIC_TOTP_SECRET: ${{ secrets.EPIC_TOTP_SECRET }}
+          EPIC_REFRESH_TOKEN: ${{ secrets.EPIC_REFRESH_TOKEN }}
+          SESSION_STATE_ENABLED: '1'
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || secrets.LLM_PROVIDER }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY_V2 || secrets.GLM_API_KEY }}
+          GLM_BASE_URL: ${{ vars.GLM_BASE_URL || secrets.GLM_BASE_URL }}
+          GLM_MODEL: ${{ vars.GLM_MODEL || secrets.GLM_MODEL }}
+          GLM_REQUEST_TIMEOUT_SECONDS: ${{ vars.GLM_REQUEST_TIMEOUT_SECONDS || secrets.GLM_REQUEST_TIMEOUT_SECONDS || '110' }}
+          CHALLENGE_CLASSIFIER_MODEL: ${{ vars.CHALLENGE_CLASSIFIER_MODEL || secrets.CHALLENGE_CLASSIFIER_MODEL }}
+          IMAGE_CLASSIFIER_MODEL: ${{ vars.IMAGE_CLASSIFIER_MODEL || secrets.IMAGE_CLASSIFIER_MODEL }}
+          SPATIAL_POINT_REASONER_MODEL: ${{ vars.SPATIAL_POINT_REASONER_MODEL || secrets.SPATIAL_POINT_REASONER_MODEL }}
+          SPATIAL_PATH_REASONER_MODEL: ${{ vars.SPATIAL_PATH_REASONER_MODEL || secrets.SPATIAL_PATH_REASONER_MODEL }}
+          BROWSER_BACKEND: auto
+          BROWSER_PROXY: ${{ secrets.BROWSER_PROXY }}
+          HEADLESS: virtual
+          DISABLE_BEZIER_TRAJECTORY: false
+          ENABLE_APSCHEDULER: false
+          AUTH_ATTEMPT_TIMEOUT_SECONDS: ${{ vars.AUTH_ATTEMPT_TIMEOUT_SECONDS || '240' }}
+          AUTH_MAX_ATTEMPTS: ${{ inputs.attempts || '5' }}
+          MPLBACKEND: Agg
+          PYTHONPATH: app
+        run: |
+          echo "🔑 登录引导：$AUTH_MAX_ATTEMPTS 次尝试"
+          xvfb-run --auto-servernum --server-num=1 --server-args='-screen 0, 1920x1080x24' uv run python scripts/login_only.py
+
+      - name: Save verified session
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            app/volumes/user_data
+            app/volumes/runtime/session-state.json
+          key: epic-session-ok-${{ github.run_id }}
+
+      - name: Save fallback session
+        if: failure()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            app/volumes/user_data
+            app/volumes/runtime/session-state.json
+          key: epic-session-last-${{ github.run_id }}
+
+      - name: Summary
+        if: always()
+        run: |
+          OUTCOME_FILE=app/volumes/runtime/run-outcome.json
+          OUTCOME=""
+          if [ -f "$OUTCOME_FILE" ]; then
+            OUTCOME=$(sed -n 's/.*"outcome"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OUTCOME_FILE" | head -n1)
+          fi
+          if [ "$OUTCOME" = "session_ok" ]; then
+            echo "## ✅ 会话已建立" >> "$GITHUB_STEP_SUMMARY"
+            echo "下一次领取运行会直接命中会话；若已铸造 refresh_token，之后可长期免登录。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## ⚠️ 本次未建立会话（${OUTCOME:-unknown}）" >> "$GITHUB_STEP_SUMMARY"
+            echo "可重复触发本工作流；每次约 6-8 分钟。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: epic-login-logs-${{ github.run_id }}
+          path: app/volumes/logs/
+          retention-days: 3
