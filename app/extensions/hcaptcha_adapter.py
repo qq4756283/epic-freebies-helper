@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import itertools
+import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,127 @@ def _build_point_prompt(
 def _is_count_selection_question(question: str) -> bool:
     normalized = question.lower()
     return "animal" in normalized and "count" in normalized
+
+
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "single": 1,
+}
+
+_HEIGHT_ORDER = (
+    "shortest",
+    "smallest",
+    "lowest",
+    "shorter",
+    "smaller",
+    "tallest",
+    "highest",
+    "largest",
+)
+_HEIGHT_OBJECTS = ("tower", "cylinder", "stack", "column", "bar", "building", "tree", "glass")
+
+
+def _parse_height_question(question: str) -> tuple[int, bool] | None:
+    """Parse "click the two shortest towers" into (count, want_shortest).
+
+    This shape is a pure geometry question - relative heights of vertical objects - and the
+    vision models are useless at it (measured: 66-280 px error on point answers). Local CV
+    can answer it exactly, which also saves a model round trip inside the challenge.
+    """
+    text = (question or "").lower()
+    if not text:
+        return None
+    if not any(word in text for word in _HEIGHT_ORDER):
+        return None
+    if not any(word in text for word in _HEIGHT_OBJECTS):
+        return None
+
+    count = 1
+    word_match = re.search(r"\b(" + "|".join(_NUMBER_WORDS) + r")\b", text)
+    if word_match:
+        count = _NUMBER_WORDS[word_match.group(1)]
+    else:
+        digit_match = re.search(r"\b(\d+)\b", text)
+        if digit_match:
+            count = int(digit_match.group(1))
+    count = max(1, min(count, 10))
+    want_shortest = bool(re.search(r"shortest|smallest|lowest|shorter|smaller", text))
+    return count, want_shortest
+
+
+def _solve_height_ranking(
+    challenge_screenshot: Path, count: int, want_shortest: bool
+) -> list[tuple[float, float]] | None:
+    """Return image-space centres of the ``count`` shortest/tallest vertical objects."""
+    image = cv2.imread(str(challenge_screenshot))
+    if image is None:
+        return None
+    bounds = _detect_clickable_grid_bounds(challenge_screenshot) or _detect_task_canvas_bounds(
+        challenge_screenshot
+    )
+    if bounds is None:
+        return None
+    x_min, y_min, x_max, y_max = bounds
+    crop = image[y_min : y_max + 1, x_min : x_max + 1]
+    if crop.size == 0:
+        return None
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    background = int(np.argmax(np.bincount(gray.ravel(), minlength=256)))
+    mask = (np.abs(gray.astype(np.int16) - background) > 18).astype(np.uint8)
+    if mask.sum() < mask.size * 0.01:
+        return None
+
+    # Trim the canvas frame: a border line touches every column, which would make every
+    # object look equally tall and turn the ranking into a coin flip.
+    inset_y = max(2, int(mask.shape[0] * 0.05))
+    inset_x = max(2, int(mask.shape[1] * 0.02))
+    if mask.shape[0] > 2 * inset_y and mask.shape[1] > 2 * inset_x:
+        mask = mask[inset_y:-inset_y, inset_x:-inset_x]
+        x_min += inset_x
+        y_min += inset_y
+    if mask.size == 0:
+        return None
+
+    threshold = max(2, int(mask.shape[0] * 0.03))
+    active = mask.sum(axis=0) > threshold
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, is_active in enumerate(active):
+        if is_active and start is None:
+            start = index
+        elif not is_active and start is not None:
+            if index - start >= 6:
+                runs.append((start, index - 1))
+            start = None
+    if start is not None and len(active) - start >= 6:
+        runs.append((start, len(active) - 1))
+    if len(runs) < 2:
+        return None
+
+    columns: list[tuple[int, int, int, int]] = []
+    for xs, xe in runs:
+        rows = np.where(mask[:, xs : xe + 1].any(axis=1))[0]
+        if rows.size == 0:
+            continue
+        columns.append((xs, xe, int(rows[0]), int(rows[-1])))
+    if len(columns) < 2:
+        return None
+
+    ranked = sorted(columns, key=lambda column: column[3] - column[2], reverse=not want_shortest)
+    picked = ranked[: max(1, min(count, len(ranked)))]
+    return [
+        (float((xs + xe) / 2 + x_min), float((ys + ye) / 2 + y_min)) for xs, xe, ys, ye in picked
+    ]
 
 
 def _entity_centers(captcha_payload: Any, crumb_id: int) -> list[tuple[int, int]]:
@@ -621,9 +743,7 @@ async def _resolve_outline_paths(
 
     if any(contour is None for contour in source_contours):
         return None
-    matched = _match_outline_contours(
-        source_contours, targets, max_score=0.65, min_margin=0.1
-    )
+    matched = _match_outline_contours(source_contours, targets, max_score=0.65, min_margin=0.1)
     if matched is None:
         logger.warning("hCaptcha outline topology match was not confident; falling back to LLM")
         return None
@@ -782,6 +902,48 @@ def apply_hcaptcha_drag_patch() -> None:
                 user_prompt = _build_point_prompt(
                     base_prompt, challenge_bbox=challenge_bbox, clickable_bounds=clickable_bounds
                 )
+
+                # Height-ranking questions ("click the two shortest towers") are pure geometry:
+                # answer them locally instead of asking a model that cannot localise points.
+                height_plan = _parse_height_question(base_prompt)
+                if height_plan is not None and challenge_bbox is not None:
+                    image_for_scale = cv2.imread(str(raw))
+                    local_points = _solve_height_ranking(raw, *height_plan)
+                    if image_for_scale is not None and local_points:
+                        image_height, image_width = image_for_scale.shape[:2]
+                        page_points = [
+                            (
+                                int(
+                                    round(
+                                        float(challenge_bbox["x"])
+                                        + x * float(challenge_bbox["width"]) / image_width
+                                    )
+                                ),
+                                int(
+                                    round(
+                                        float(challenge_bbox["y"])
+                                        + y * float(challenge_bbox["height"]) / image_height
+                                    )
+                                ),
+                            )
+                            for x, y in local_points
+                        ]
+                        logger.info(
+                            "hCaptcha height ranking solved locally | count={} shortest={} points={}",
+                            height_plan[0],
+                            height_plan[1],
+                            page_points,
+                        )
+                        for px, py in page_points:
+                            await self.page.mouse.click(px, py, delay=180)
+                            await self.page.wait_for_timeout(500)
+                        with suppress(PlaywrightTimeoutError):
+                            submit_btn = frame_challenge.locator(
+                                "//div[@class='button-submit button']"
+                            )
+                            await self.click_by_mouse(submit_btn)
+                        continue
+
                 response = await self._spatial_point_reasoner(
                     challenge_screenshot=raw,
                     grid_divisions=projection,
