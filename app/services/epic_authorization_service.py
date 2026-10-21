@@ -994,9 +994,24 @@ class EpicAuthorization:
                     attempt,
                     max_attempts,
                 )
-                with suppress(Exception):
-                    await self.page.context.clear_cookies()
+                # Deliberately keep cookies. A failed attempt can still leave a valid
+                # account session behind (run 39486291763 cleared cookies after a login
+                # that had actually succeeded and lost it). Epic's own invalidation paths
+                # clear cookies when they detect a dead session, so wiping here only
+                # destroys the one thing worth keeping.
                 await self._replace_page()
+
+        # Last resort: every page-level signal can be wrong while the account API still
+        # answers. If it does, this run did get a session and the token must be minted now,
+        # because a later run may not get another chance.
+        if await self._account_session_ok():
+            logger.success(
+                "Page signals reported failure but the account API confirms a session; "
+                "keeping it and minting the token"
+            )
+            self._mark_profile_healthy()
+            await session_vault.ensure_state(self.page.context)
+            return True
 
         logger.error("Epic Games authentication failed after {} attempts", max_attempts)
         return False
