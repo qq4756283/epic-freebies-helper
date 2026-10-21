@@ -18,5 +18,29 @@
       "source": "browser_login",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-21T17:45:28Z",
+    "run_id": "39646083969",
+    "event": "workflow_dispatch",
+    "outcome": "all_already_owned",
+    "stage": "verify",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "ok",
+        "ms": 115276.8
+      },
+      {
+        "stage": "claim",
+        "result": "ok",
+        "ms": 23651.2
+      }
+    ],
+    "session": {
+      "source": "browser_login",
+      "has_refresh_token": true
+    }
   }
 ]
