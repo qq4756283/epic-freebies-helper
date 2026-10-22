@@ -215,6 +215,35 @@ def _build_point_prompt(
     return f"{user_prompt}\n\n{constraint}"
 
 
+async def _wait_for_challenge_image(frame_challenge: Any, timeout_ms: int = 8000) -> bool:
+    """Wait until the challenge image is really painted.
+
+    Capturing too early sends the model hCaptcha's shimmer placeholder - the 2026-10-23 log
+    shows answers like "the image shows an abstract landscape with vertical striped
+    overlays", i.e. the skeleton, not the puzzle. Every such capture burns a challenge.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            ready = await frame_challenge.evaluate(
+                """(frame) => {
+                    const doc = frame.contentDocument || frame.ownerDocument;
+                    if (!doc) return false;
+                    const img = doc.querySelector(".challenge-view img, .challenge-view canvas, img");
+                    if (!img) return false;
+                    if (img.tagName === "CANVAS") return img.width > 16 && img.height > 16;
+                    return Boolean(img.complete) && (img.naturalWidth || 0) > 16;
+                }"""
+            )
+        except Exception:
+            ready = False
+        if ready:
+            return True
+        await asyncio.sleep(0.25)
+    logger.warning("hCaptcha challenge image did not finish loading within {}ms", timeout_ms)
+    return False
+
+
 def _is_count_selection_question(question: str) -> bool:
     normalized = question.lower()
     return "animal" in normalized and "count" in normalized
@@ -881,6 +910,7 @@ def apply_hcaptcha_drag_patch() -> None:
 
             for cid in range(crumb_count):
                 await self.page.wait_for_timeout(self.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS)
+                await _wait_for_challenge_image(frame_challenge)
                 raw, projection = await self._capture_spatial_mapping(
                     frame_challenge, cache_key, cid
                 )
@@ -985,6 +1015,7 @@ def apply_hcaptcha_drag_patch() -> None:
 
         for cid in range(crumb_count):
             await self.page.wait_for_timeout(self.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS)
+            await _wait_for_challenge_image(frame_challenge)
             raw, projection = await self._capture_spatial_mapping(frame_challenge, cache_key, cid)
             challenge_bbox = await frame_challenge.locator(
                 "//div[@class='challenge-view']"
