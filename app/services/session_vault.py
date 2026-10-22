@@ -32,6 +32,7 @@ import json
 import os
 import re
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -562,6 +563,32 @@ async def confirm_switch_account(page: Any, email: str = "", timeout_seconds: in
                     return "form"
             except Exception:
                 continue
+
+        # The account tile is a plain element with a click handler, and the page masks the
+        # address ("2***2@qq.com"), so neither an email text match nor a button selector can
+        # reach it. Click the smallest node that contains the "Welcome back" greeting.
+        with suppress(Exception):
+            clicked = await page.evaluate(
+                """() => {
+                    const nodes = Array.from(
+                        document.querySelectorAll("div,span,button,a,li,[role='button']")
+                    );
+                    const hits = nodes.filter((n) => /welcome back/i.test(n.textContent || ""));
+                    if (!hits.length) return 0;
+                    hits.sort((a, b) => (a.textContent || "").length - (b.textContent || "").length);
+                    const el = hits[0];
+                    el.click?.();
+                    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+                    return hits.length;
+                }"""
+            )
+            if clicked:
+                logger.info(
+                    "switch-account: clicked the account tile via DOM ({} candidates)", clicked
+                )
+                await page.wait_for_timeout(1800)
+                if "switch-account" not in (page.url or ""):
+                    return "confirmed"
 
         await page.wait_for_timeout(600)
 
