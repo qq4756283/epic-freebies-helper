@@ -44,6 +44,24 @@ PURCHASE_IFRAME_SELECTOR = (
     "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]"
 )
 CHECKOUT_BUTTON_TEXTS = ("PLACE ORDER", "ADD TO LIBRARY")
+
+# Candidate purchase CTAs, in priority order. Epic dropped the stable
+# ``purchase-cta-button`` testid on the 2026-10 storefront: the freebie page renders a plain
+# button whose text is just "Get", which is why the old single-selector lookup timed out for
+# 15s and then (before that fix) mislabelled payable games as already owned.
+PURCHASE_CTA_SELECTORS = (
+    "//button[@data-testid='purchase-cta-button']",
+    "//a[@data-testid='purchase-cta-button']",
+    "//*[@data-testid='purchase-cta-button']",
+    "//button[normalize-space(.)='Get']",
+    "//button[normalize-space(.)='获取']",
+    "//button[normalize-space(.)='Add to Cart']",
+    "//button[normalize-space(.)='In Library']",
+    "//button[contains(normalize-space(.), 'Add to Library')]",
+    "//button[contains(normalize-space(.), 'In Library')]",
+    "//button[contains(normalize-space(.), 'Buy Now')]",
+    "//button[contains(normalize-space(.), 'Pre-Purchase')]",
+)
 CHECKOUT_BUTTON_PATTERN = re.compile(
     rf"^(?:{'|'.join(map(re.escape, CHECKOUT_BUTTON_TEXTS))})$", re.IGNORECASE
 )
@@ -2054,6 +2072,25 @@ class EpicGames:
                 return False
             return await self._finalize_unconfirmed_checkout(page, promotion)
 
+    async def _resolve_purchase_cta(self, page: Page, timeout_ms: int = 12000):
+        """Return the first visible purchase CTA, or None.
+
+        Polls every candidate selector until the timeout instead of betting on one testid:
+        the storefront mixes old (data-testid) and new (plain "Get") markup, and the page
+        hydrates after ``domcontentloaded``.
+        """
+        deadline = time.monotonic() + max(1.0, timeout_ms / 1000)
+        while time.monotonic() < deadline:
+            for selector in PURCHASE_CTA_SELECTORS:
+                try:
+                    candidate = page.locator(selector).first
+                    if await candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+            await page.wait_for_timeout(400)
+        return None
+
     async def add_promotion_to_cart(
         self, page: Page, promotions: List[PromotionGame]
     ) -> tuple[bool, int, List[str]]:
@@ -2097,28 +2134,15 @@ class EpicGames:
             # 🔥 新思路：彻底解决按钮识别问题 (黑名单机制 + 智能点击)
             # ------------------------------------------------------------
 
-            # 1. 尝试找到所有可能的“主按钮”
-            # Epic 按钮通常有 'purchase-cta-button' 这个 TestID
-            purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
+            # 1. 解析主按钮：Epic 已不再稳定使用 purchase-cta-button 这个 testid
+            # （2026-10-22 的页面文本里 CTA 是纯文本 "Get"）。按"候选选择器轮询"取第一个可见按钮。
+            purchase_btn = await self._resolve_purchase_cta(page)
 
-            # 2. 等主按钮真正渲染出来再判断状态。
-            # is_visible() 不等待：页面还在水合时它会立刻返回 False，随后用整页文本兜底就会
-            # 把"按钮还没出来"误判成"已在库"。2026-10-22 的实际后果是本该领取的
-            # Sker Ritual / Home 被跳过（新上架游戏不可能已在库）。
-            try:
-                await purchase_btn.wait_for(state="visible", timeout=15000)
-            except Exception:
-                logger.warning(
-                    "Purchase CTA did not appear within 15s | title='{}' url='{}'",
-                    game_title,
-                    url,
-                )
-
-            if not await purchase_btn.is_visible():
+            if purchase_btn is None:
                 # 按钮缺失只说明"状态未知"，不等于"已拥有"。宁可这一轮报失败让下一次重试，
                 # 也不要把可领取的东西静默跳过。
                 logger.warning(
-                    "Could not find any purchase button; treating as unconfirmed | title='{}' url='{}'",
+                    "Could not resolve any purchase CTA; treating as unconfirmed | title='{}' url='{}'",
                     game_title,
                     url,
                 )
