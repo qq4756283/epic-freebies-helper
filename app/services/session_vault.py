@@ -478,15 +478,29 @@ async def store_logged_in(page: Any) -> bool:
     """Whether the store domain currently has a session.
 
     The old ``<egs-navigation isloggedin>`` attribute no longer exists on the 2026 React
-    storefront (the dumped home page has no such element), so this probes the account menu
-    markers first and only then falls back to the legacy attribute.
+    storefront. Order matters here: a visible "Sign In" control is checked first, because
+    generic account links exist in the footer for logged-out visitors too - treating those
+    as a session made the auth stage return ok without ever logging in.
     """
+    for selector in (
+        "button:has-text('Sign In')",
+        "a:has-text('Sign In')",
+        "button:has-text('Sign in')",
+        "a[href*='/login']:has-text('Sign')",
+    ):
+        try:
+            if await page.locator(selector).first.is_visible(timeout=800):
+                return False
+        except Exception:
+            continue
+
     for selector in (
         "[data-testid='user-menu']",
         "[data-testid='account-menu']",
         "[data-testid='avatar']",
         "button[aria-label*='Account']",
-        "a[href*='/account/personal']",
+        "[data-testid='user-avatar']",
+        "[data-testid='account-avatar']",
     ):
         try:
             if await page.locator(selector).first.is_visible(timeout=800):
@@ -495,23 +509,12 @@ async def store_logged_in(page: Any) -> bool:
             continue
 
     try:
-        value = await page.locator("//egs-navigation").get_attribute("isloggedin", timeout=1500)
+        value = await page.locator("//egs-navigation").get_attribute("isloggedin", timeout=1200)
         if value == "true":
             return True
     except Exception:
         pass
 
-    for selector in (
-        "a[href*='/login']",
-        "button:has-text('Sign In')",
-        "a:has-text('Sign In')",
-        "button:has-text('Sign in')",
-    ):
-        try:
-            if await page.locator(selector).first.is_visible(timeout=800):
-                return False
-        except Exception:
-            continue
     return False
 
 
