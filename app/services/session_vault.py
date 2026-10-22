@@ -567,6 +567,36 @@ async def confirm_switch_account(page: Any, email: str = "", timeout_seconds: in
         # The account tile is a plain element with a click handler, and the page masks the
         # address ("2***2@qq.com"), so neither an email text match nor a button selector can
         # reach it. Click the smallest node that contains the "Welcome back" greeting.
+        # React ignores synthetic clicks (the DOM click above left the URL unchanged), so click
+        # the tile and the escape button with real mouse events at their coordinates.
+        with suppress(Exception):
+            rect = await page.evaluate(
+                """() => {
+                    const nodes = Array.from(
+                        document.querySelectorAll("div,span,button,a,li,[role='button']")
+                    );
+                    const pick = (re) => {
+                        const hits = nodes.filter((n) => re.test(n.textContent || ""));
+                        if (!hits.length) return null;
+                        hits.sort(
+                            (a, b) => (a.textContent || "").length - (b.textContent || "").length
+                        );
+                        const r = hits[0].getBoundingClientRect();
+                        if (!r || !r.width || !r.height) return null;
+                        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+                    };
+                    return pick(/welcome back/i) || pick(/use another account/i);
+                }"""
+            )
+            if rect:
+                await page.mouse.click(rect["x"], rect["y"])
+                logger.info("switch-account: trusted mouse click at ({}, {})", rect["x"], rect["y"])
+                await page.wait_for_timeout(2000)
+                if "switch-account" not in (page.url or ""):
+                    return "confirmed"
+                if await page.locator("#email").first.is_visible(timeout=1000):
+                    return "form"
+
         with suppress(Exception):
             clicked = await page.evaluate(
                 """() => {
