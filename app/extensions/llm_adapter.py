@@ -781,7 +781,7 @@ _POINT_TEXT_PATTERNS = (
 )
 
 
-def _extract_points_from_text(text: str) -> list[dict[str, int]]:
+def _extract_points_from_narration(text: str) -> list[dict[str, int]]:
     """Pull click points out of a narrated answer.
 
     Point/area challenges sometimes come back as prose ("the line breaks at x: 512, y: 238")
@@ -1002,7 +1002,7 @@ def _coerce_payload_for_schema(payload: dict[str, Any], schema: Any, text: str) 
         if area_payload:
             return area_payload
 
-        prose_points = _extract_points_from_text(text)
+        prose_points = _extract_points_from_narration(text)
         if prose_points:
             logger.info(
                 "GLM answered a point challenge in prose; recovered {} point(s)", len(prose_points)

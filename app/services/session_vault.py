@@ -616,6 +616,16 @@ STORE_SILENT_LOGIN_URL = (
 # Entry point that produces a store session as a by-product of logging in: the store
 # redirects to the account service with its own client id and comes back with a code.
 STORE_LOGIN_ENTRY = "https://store.epicgames.com/login"
+# OIDC-style silent authorize for the store client: with a live account session Epic answers
+# with a redirect straight to redirect_uri (no switch-account chooser). This is the URL that
+# switch-account was reached from, minus prompt=none.
+PORTAL_SILENT_HANDOFF = (
+    "https://www.epicgames.com/id/login"
+    "?redirect_uri=https%3A%2F%2Fstore.epicgames.com%2Fen-US%2Ffree-games"
+    "&response_type=code"
+    f"&client_id={STORE_CLIENT_ID}"
+    "&prompt=none"
+)
 
 _SWITCH_ACCOUNT_SELECTORS = (
     "[data-testid='modal-content'] [role='button']",
@@ -800,9 +810,24 @@ async def confirm_switch_account(page: Any, email: str = "", timeout_seconds: in
 async def store_login_handoff(page: Any, timeout_seconds: int = 40) -> bool:
     """Log in *through the store* so the store domain gets its own session.
 
-    Sequence: store /en-US/login -> account service (switch-account or credentials) ->
-    redirect back to the store with a code. The claim page then behaves normally.
+    First tries the OIDC silent authorize (prompt=none): with a live account session Epic
+    redirects straight back to the store with a code, no chooser and no form. Falls back to
+    the store login entry when that does not apply.
     """
+    try:
+        await page.goto(PORTAL_SILENT_HANDOFF, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(1200)
+        url = page.url or ""
+        if "store.epicgames.com" in url and "/login" not in url:
+            logger.success("Silent store handoff completed | url={}", url)
+            return True
+        if "store.epicgames.com" in url and "code=" in url:
+            logger.success("Silent store handoff returned a code | url={}", url[:160])
+            return True
+        logger.info("Silent store handoff did not redirect | url={}", url[:160])
+    except Exception as err:
+        logger.info("Silent store handoff failed | error={!r}", err)
+
     try:
         await page.goto(STORE_LOGIN_ENTRY, wait_until="domcontentloaded", timeout=30000)
     except Exception as err:
