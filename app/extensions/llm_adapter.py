@@ -59,6 +59,7 @@ def reset_model_cooldowns() -> None:
     """Clear all cooldowns (tests and long-lived scheduler runs)."""
     _cooldown_until.clear()
 
+
 CHALLENGE_PROMPT_ALIASES = (
     "challenge_prompt",
     "Challenge Prompt",
@@ -773,6 +774,36 @@ def _build_points_payload(
     return {"challenge_prompt": challenge_prompt, "inferred_rule": inferred_rule, "points": points}
 
 
+_POINT_TEXT_PATTERNS = (
+    re.compile(r'"x"\s*:\s*(\d{1,4})\s*,\s*"y"\s*:\s*(\d{1,4})'),
+    re.compile(r"x\s*[:=]\s*(\d{1,4})\s*[,;\s]+y\s*[:=]\s*(\d{1,4})", re.IGNORECASE),
+    re.compile(r"\(\s*(\d{1,4})\s*,\s*(\d{1,4})\s*\)"),
+)
+
+
+def _extract_points_from_text(text: str) -> list[dict[str, int]]:
+    """Pull click points out of a narrated answer.
+
+    Point/area challenges sometimes come back as prose ("the line breaks at x: 512, y: 238")
+    instead of JSON. Rejecting that answer burns the whole challenge; the numbers are still
+    usable, so take them.
+    """
+    points: list[dict[str, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for pattern in _POINT_TEXT_PATTERNS:
+        for raw_x, raw_y in pattern.findall(text or ""):
+            x, y = int(raw_x), int(raw_y)
+            if not (0 < x <= 4000 and 0 < y <= 4000):
+                continue
+            if (x, y) in seen:
+                continue
+            seen.add((x, y))
+            points.append({"x": x, "y": y})
+        if points:
+            break
+    return points[:6]
+
+
 def _build_area_select_payload(
     boxes: list[dict[str, int]], *, challenge_prompt: str = "", inferred_rule: str = ""
 ) -> dict[str, Any] | None:
@@ -971,6 +1002,13 @@ def _coerce_payload_for_schema(payload: dict[str, Any], schema: Any, text: str) 
         if area_payload:
             return area_payload
 
+        prose_points = _extract_points_from_text(text)
+        if prose_points:
+            logger.info(
+                "GLM answered a point challenge in prose; recovered {} point(s)", len(prose_points)
+            )
+            return {"challenge_prompt": challenge_prompt, "points": prose_points}
+
         answer_payload = payload.get("answer")
         if isinstance(answer_payload, list):
             boxes = []
@@ -1164,7 +1202,9 @@ class _GLMAsyncModels:
 
         return None
 
-    def _build_messages(self, contents: Any, config: Any, model: str | None = None) -> list[dict[str, Any]]:
+    def _build_messages(
+        self, contents: Any, config: Any, model: str | None = None
+    ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         system_messages: list[str] = []
         has_image = False
