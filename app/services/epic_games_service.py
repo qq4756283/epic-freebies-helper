@@ -1061,6 +1061,26 @@ class EpicGames:
                 logger.debug("Device modal dismissal restored claim progress - {}", url)
                 return True
 
+        # The Get click can bounce into Epic's store login (switch-account) when the store
+        # domain has no session yet. Finish that handshake once and retry the click.
+        if "switch-account" in (page.url or "") or "/auth/login" in (page.url or ""):
+            logger.warning(
+                "Claim click bounced into the store login flow; completing SSO and retrying - {}",
+                url,
+            )
+            if await session_vault.store_silent_login(page):
+                with suppress(Exception):
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(1500)
+                retry_btn = await self._resolve_purchase_cta(page)
+                if retry_btn is not None:
+                    with suppress(Exception):
+                        await retry_btn.click(timeout=5000, no_wait_after=True)
+                    await page.wait_for_timeout(3000)
+                    if await self._has_purchase_progress(page, url):
+                        logger.success("Claim progressed after completing store SSO - {}", url)
+                        return True
+
         await self._capture_purchase_debug(page, "click_no_effect", url)
         return False
 

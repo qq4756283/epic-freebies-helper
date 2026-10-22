@@ -444,12 +444,15 @@ STORE_SILENT_LOGIN_URL = (
 )
 
 
-async def store_silent_login(page: Any, timeout_seconds: int = 20) -> bool:
+async def store_silent_login(page: Any, timeout_seconds: int = 25) -> bool:
     """Finish the store-domain SSO with ``prompt=none``.
 
     An account session on www.epicgames.com is not a store session: store.epicgames.com
     authenticates as its own OAuth client (875a3b57...), and without this handoff every
     Get click is redirected to /id/login/switch-account.
+
+    That switch-account page is part of the flow: the account is known, Epic just wants a
+    confirmation click. So this helper also clicks through it instead of giving up.
     """
     try:
         await page.goto(STORE_SILENT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
@@ -457,12 +460,37 @@ async def store_silent_login(page: Any, timeout_seconds: int = 20) -> bool:
         logger.warning("Store silent login navigation failed | error={!r}", err)
         return False
 
+    clicked_switch = 0
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         url = page.url or ""
         if "/auth/login" not in url and "switch-account" not in url:
             logger.success("Store silent login completed | url={}", url)
             return True
+
+        if "switch-account" in url and clicked_switch < 2:
+            clicked_switch += 1
+            clicked = False
+            for selector in (
+                "button:has-text('Continue')",
+                "[data-testid='switch-account-continue']",
+                "button:has-text('Continue as')",
+                "a:has-text('Continue')",
+                "[role='button']:has-text('Continue')",
+            ):
+                try:
+                    candidate = page.locator(selector).first
+                    if await candidate.is_visible(timeout=1500):
+                        await candidate.click(timeout=3000)
+                        logger.info("Confirmed the switch-account prompt via {}", selector)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                await page.wait_for_timeout(1200)
+                continue
+
         await page.wait_for_timeout(700)
 
     logger.warning("Store silent login did not complete | url={}", page.url)
