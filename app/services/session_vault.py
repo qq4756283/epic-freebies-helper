@@ -32,6 +32,7 @@ import json
 import os
 import re
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -442,59 +443,109 @@ async def _seed(context: Any, token: str) -> bool:
 STORE_SILENT_LOGIN_URL = (
     "https://store.epicgames.com/auth/login?returnPath=%2Fen-US%2Ffree-games&prompt=none"
 )
+# Entry point that produces a store session as a by-product of logging in: the store
+# redirects to the account service with its own client id and comes back with a code.
+STORE_LOGIN_ENTRY = "https://store.epicgames.com/en-US/login"
+
+_SWITCH_ACCOUNT_SELECTORS = (
+    "[data-testid='switch-account-continue']",
+    "button:has-text('Continue')",
+    "//button[contains(normalize-space(.), 'Continue')]",
+    "//*[@role='button'][contains(normalize-space(.), 'Continue')]",
+    "a:has-text('Continue')",
+    "[data-testid*='switch'] button",
+    "//button[contains(normalize-space(.), 'Sign in')]",
+)
 
 
-async def store_silent_login(page: Any, timeout_seconds: int = 25) -> bool:
-    """Finish the store-domain SSO with ``prompt=none``.
+async def _dump_page_html(page: Any, name: str, limit: int = 200_000) -> None:
+    """Persist the current DOM so a failed handshake can be diagnosed from artifacts."""
+    try:
+        html = await page.content()
+    except Exception as err:
+        logger.warning("Could not dump {} DOM | error={!r}", name, err)
+        return
+    try:
+        target = STATE_PATH.parent.joinpath(f"{name}.html")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(html[:limit], encoding="utf-8")
+        logger.warning("Dumped {} DOM | path={} | url={}", name, target, page.url)
+    except OSError as err:
+        logger.warning("Could not write {} DOM | error={!r}", name, err)
 
-    An account session on www.epicgames.com is not a store session: store.epicgames.com
-    authenticates as its own OAuth client (875a3b57...), and without this handoff every
-    Get click is redirected to /id/login/switch-account.
 
-    That switch-account page is part of the flow: the account is known, Epic just wants a
-    confirmation click. So this helper also clicks through it instead of giving up.
+async def confirm_switch_account(page: Any, timeout_seconds: int = 20) -> bool:
+    """Confirm Epic's "which account?" page so the store login can complete.
+
+    After an account-level login, store.epicgames.com still asks for a confirmation on
+    www.epicgames.com/id/login/switch-account. Without that click the store never receives
+    its authorization code, and every Get click bounces back to this page.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if "switch-account" not in (page.url or ""):
+            return True
+        for selector in _SWITCH_ACCOUNT_SELECTORS:
+            try:
+                candidate = page.locator(selector).first
+                if await candidate.is_visible(timeout=1200):
+                    await candidate.click(timeout=3000)
+                    logger.info("switch-account confirmed via {}", selector)
+                    await page.wait_for_timeout(1500)
+                    if "switch-account" not in (page.url or ""):
+                        return True
+            except Exception:
+                continue
+
+        # Keyboard fallback: the row may be focusable but not matched by a selector.
+        with suppress(Exception):
+            await page.keyboard.press("Enter")
+            await page.wait_for_timeout(800)
+            if "switch-account" not in (page.url or ""):
+                return True
+
+        await page.wait_for_timeout(600)
+
+    await _dump_page_html(page, "switch-account")
+    logger.warning("switch-account confirmation failed | url={}", page.url)
+    return False
+
+
+async def store_login_handoff(page: Any, timeout_seconds: int = 40) -> bool:
+    """Log in *through the store* so the store domain gets its own session.
+
+    Sequence: store /en-US/login -> account service (switch-account or credentials) ->
+    redirect back to the store with a code. The claim page then behaves normally.
     """
     try:
-        await page.goto(STORE_SILENT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(STORE_LOGIN_ENTRY, wait_until="domcontentloaded", timeout=30000)
     except Exception as err:
-        logger.warning("Store silent login navigation failed | error={!r}", err)
+        logger.warning("Store login entry navigation failed | error={!r}", err)
         return False
 
-    clicked_switch = 0
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         url = page.url or ""
-        if "/auth/login" not in url and "switch-account" not in url:
-            logger.success("Store silent login completed | url={}", url)
+        if "switch-account" in url:
+            if not await confirm_switch_account(page, timeout_seconds=15):
+                return False
+            continue
+        if "/auth/login" in url:
+            await page.wait_for_timeout(700)
+            continue
+        if "store.epicgames.com" in url and "/login" not in url:
+            logger.success("Store login handoff completed | url={}", url)
             return True
-
-        if "switch-account" in url and clicked_switch < 2:
-            clicked_switch += 1
-            clicked = False
-            for selector in (
-                "button:has-text('Continue')",
-                "[data-testid='switch-account-continue']",
-                "button:has-text('Continue as')",
-                "a:has-text('Continue')",
-                "[role='button']:has-text('Continue')",
-            ):
-                try:
-                    candidate = page.locator(selector).first
-                    if await candidate.is_visible(timeout=1500):
-                        await candidate.click(timeout=3000)
-                        logger.info("Confirmed the switch-account prompt via {}", selector)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-            if clicked:
-                await page.wait_for_timeout(1200)
-                continue
-
         await page.wait_for_timeout(700)
 
-    logger.warning("Store silent login did not complete | url={}", page.url)
+    await _dump_page_html(page, "store-login-handoff")
+    logger.warning("Store login handoff did not complete | url={}", page.url)
     return False
+
+
+async def store_silent_login(page: Any, timeout_seconds: int = 25) -> bool:
+    """Backwards-compatible alias for the store login handoff."""
+    return await store_login_handoff(page, timeout_seconds=timeout_seconds)
 
 
 async def ensure_state(context: Any) -> bool:

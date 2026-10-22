@@ -700,32 +700,15 @@ class EpicAuthorization:
         "https://store.epicgames.com/auth/login?returnPath=%2Fen-US%2Ffree-games&prompt=none"
     )
 
-    async def _store_silent_login(self, timeout_seconds: int = 20) -> bool:
-        """Complete the store-domain handoff through Epic's silent SSO.
+    async def _store_silent_login(self, timeout_seconds: int = 40) -> bool:
+        """Complete the store-domain handoff.
 
-        An account session on www.epicgames.com does not create a store session on
-        store.epicgames.com. Without this step the store's own OAuth client (875a3b57...)
-        sends every Get click to /id/login/switch-account, which is exactly what the
-        2026-10-22 debug dump shows.
+        Delegates to the vault, which walks the store login entry, confirms the
+        switch-account prompt when Epic asks, and waits for the store domain to come back
+        with a session. The old ``/auth/login?prompt=none`` URL does not redirect on its
+        own, so it is no longer used.
         """
-        try:
-            await self.page.goto(
-                self.STORE_SILENT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000
-            )
-        except Exception as err:
-            logger.warning("Store silent login navigation failed | error={!r}", err)
-            return False
-
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            url = self.page.url or ""
-            if "/auth/login" not in url and "switch-account" not in url:
-                logger.success("Store silent login completed | url={}", url)
-                return True
-            await self.page.wait_for_timeout(700)
-
-        logger.warning("Store silent login did not complete | url={}", self.page.url)
-        return False
+        return await session_vault.store_login_handoff(self.page, timeout_seconds=timeout_seconds)
 
     async def _settle_after_login(self, timeout_seconds: int = 30) -> None:
         """Let the post-login redirect chain finish before judging the store session.
@@ -877,8 +860,31 @@ class EpicAuthorization:
             self._drain_queue(self._login_error_signal)
             self._drain_queue(self._is_refresh_csrf_signal)
 
-            point_url = "https://www.epicgames.com/account/personal?lang=en-US&productName=egs&sessionInvalidated=true"
+            # Enter through the store, not the account portal: store.epicgames.com runs its
+            # own OAuth client (875a3b57...) and only creates its session when the login
+            # round trip starts there. Entering at /account/personal leaves the store
+            # logged out, so every Get click is bounced to switch-account.
+            point_url = session_vault.STORE_LOGIN_ENTRY
             await self.page.goto(point_url, wait_until="domcontentloaded")
+            await self.page.wait_for_timeout(1500)
+
+            if "switch-account" in (self.page.url or ""):
+                logger.warning(
+                    "Epic asks which account to continue with; confirming the known account"
+                )
+                if not await session_vault.confirm_switch_account(self.page):
+                    raise RuntimeError("Epic switch-account prompt could not be confirmed")
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    url = self.page.url or ""
+                    if "switch-account" not in url and "/id/login" not in url:
+                        break
+                    await self.page.wait_for_timeout(700)
+                logger.success(
+                    "Store login entry completed the store session | url={}", self.page.url
+                )
+                return True
+
             await self._wait_for_login_form(point_url)
 
             # 1. 使用电子邮件地址登录
