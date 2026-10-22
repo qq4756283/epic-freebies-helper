@@ -2075,3 +2075,48 @@
     profile 的 cookie 缓存，会话一旦自然过期仍需再登录一次（有本地 CV 解题器后成功率显著提高）。
   - 订单历史 JSON 请求被 Cloudflare 403（浏览器指纹不足），已回退页面抓取；`already_owned`
     判定不受影响，但"订单级证据"仍缺一层。
+
+### 2026-10-23 02:00-02:35 打通进展：store 域会话为真正卡点，已定位到 switch-account 页面结构
+
+- 现象（本轮 8 次真实运行，39810901164 → 39832091142）：
+  - auth 阶段多次报 `Epic Games is already logged in`（`egs-navigation` 的 `isloggedin` 标记），
+    但点 `Get` 之后页面跳到
+    `www.epicgames.com/id/login/switch-account?...&client_id=875a3b57d3a640a6b7f9b4e883463ab4`，
+    领取永远无法推进。
+  - 早期日志还出现 `Purchase CTA did not appear within 15s`、`Could not resolve any purchase
+    CTA`、`takeover ... intercepts pointer events` 等表象。
+- 根因判断（逐层剥离）：
+  1. **账户域登录 ≠ store 域登录**。`store.epicgames.com` 用自己的 OAuth client
+     `875a3b57d3a640a6b7f9b4e883463ab4` 换 code；账户域会话存在时，`egs-navigation` 标记为 true，
+     但 store 的购买流程仍会跳 switch-account。此前把 `isloggedin=true` 当成"可以领取"，是
+     整条链路失败的真正原因。
+  2. **CTA 选择器已失效**：2026-10 storefront 的免费游戏按钮没有 `purchase-cta-button` testid，
+     就是普通按钮、文本 `Get`（页面 dump 里可见 `-100% $4.99 Free Sale ends ... Get Wishlist`）。
+  3. **switch-account 页面结构**（`runtime/switch-account.html`，29820 bytes，标题
+     "Confirm Your Account | Epic Games"）：文案 `Welcome back <name> 2***2@qq.com`，邮箱是
+     **打码**的，页面只有一个 `<button>Use another account</button>`，账号本身是可点击的普通元素
+     （无 data-testid，位于 `[data-testid='modal-content']` 里）。
+- 改动文件（本轮已推送）：
+  - `app/services/epic_games_service.py`：`_resolve_purchase_cta()` 用 11 个候选选择器轮询 CTA；
+    去掉整页文本"已在库"判定（新上架游戏会被误判）；补上 EpicGames 缺失的
+    `_load_order_history_payload`；`_dismiss_takeover()` 关闭/穿透 store takeover 遮罩；
+    点击后若被弹到 switch-account 则调用 SSO 握手并重试一次。
+  - `app/services/session_vault.py`：`store_logged_in()` 先看 `Sign In` 控件再看头像/菜单标记；
+    `confirm_switch_account()` 返回 `confirmed/form/failed`，按"账号磁贴 → Use another account →
+    最小包含 Welcome back 的节点 DOM 点击"顺序尝试，失败才 dump；
+    `store_login_handoff()` 走 `store.epicgames.com/login` 入口；`STORE_CLIENT_ID` 参与 seed。
+  - `app/services/epic_authorization_service.py`：登录入口改为 store 域；`invoke()` 在
+    `isloggedin=true` 时**先验证 store 会话**，验证不过就落到真实登录；`_login()` 处理
+    switch-account（confirmed/form 两条分支）；`_ensure_email_editable()` 处理 readonly 表单。
+  - `.github/workflows/*.yml`：`uv sync` 三次重试（2026-10-22 两次因 PyPI 抖动整轮作废）。
+- 处理结果：
+  - 已确认链路前半段稳定：登录 → 会话 → 铸造 refresh_token → 首页 0 验证码（2–4 分钟）。
+  - 仍在 `switch-account` 卡住：DOM 点击磁贴触发不了跳转（日志每 2.4 s 一次
+    "clicked the account tile via DOM"，URL 不变），`Use another account` 也没命中，推测该
+    弹层在 shadow DOM / portal 中，需要递归穿透 shadowRoot 或用 `frame_locator` 点击。
+- 下一步（明确）：
+  1. 用 `page.evaluate` 递归遍历 shadowRoot，找到文本为 `Use another account` 或包含
+     `Welcome back` 的可点击节点并 `click()`；仍失败则改用"换账号表单"路径（点击该按钮后
+     填账密，这是一条确定性路径）。
+  2. 若两条都不行，改为"在 store 域完成一次完整登录"（`/login` → 表单 → 验证码），把
+     store 会话作为登录副产品，然后在同一会话里领取。
