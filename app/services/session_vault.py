@@ -51,6 +51,13 @@ OAUTH_TOKEN_URL = os.getenv(
     "EPIC_OAUTH_TOKEN_URL",
     "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token",
 )
+# Documented launcher -> web handoff: an access token becomes a one-time "exchange code",
+# and id/api/exchange turns that code into normal web cookies. This is the only path that
+# produces a session without touching the login page (and therefore without a captcha).
+OAUTH_EXCHANGE_URL = os.getenv(
+    "EPIC_OAUTH_EXCHANGE_URL",
+    "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/exchange",
+)
 # The web client that owns store.epicgames.com / www.epicgames.com sessions. Codes issued
 # for this client are the ones ``id/api/exchange`` accepts, which is why seeding uses it
 # while minting has to keep the launcher client (that pair is what grants a refresh token).
@@ -363,6 +370,37 @@ async def _mint(context: Any) -> bool:
     return _store_token_payload(body, source="browser_login")
 
 
+async def request_exchange_code() -> str | None:
+    """Turn the stored access token into a one-time web exchange code."""
+    token = await access_token()
+    if not token:
+        return None
+    try:
+        async with _client() as client:
+            response = await client.get(
+                OAUTH_EXCHANGE_URL, headers={"Authorization": f"bearer {token}"}
+            )
+    except Exception as err:
+        logger.warning("Session vault: exchange request failed | error={!r}", err)
+        return None
+
+    if response.status_code != 200:
+        logger.warning(
+            "Session vault: exchange rejected | status={} | body={}",
+            response.status_code,
+            response.text[:160],
+        )
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    if code:
+        logger.info("Session vault: exchange code acquired | expires_in={}", body.get("expiresIn"))
+    return code or None
+
+
 async def try_seed(context: Any) -> bool:
     """Turn the stored token into browser cookies so the login page never renders.
 
@@ -371,6 +409,35 @@ async def try_seed(context: Any) -> bool:
     """
     if not enabled():
         return False
+
+    # Preferred path: documented launcher -> web handoff (no login page, no captcha).
+    exchange_code = await request_exchange_code()
+    if exchange_code:
+        try:
+            seeded = await context.request.get(
+                WEB_EXCHANGE_URL,
+                params={"code": exchange_code},
+                timeout=HTTP_TIMEOUT_SECONDS * 1000,
+            )
+        except Exception as err:
+            logger.warning("Session vault: exchange-code seeding failed | error={!r}", err)
+            seeded = None
+        if seeded is not None and seeded.status < 400:
+            logger.success(
+                "Session vault: account session seeded from the exchange code | status={}",
+                seeded.status,
+            )
+            page = context.pages[0] if getattr(context, "pages", None) else None
+            if page is not None:
+                # Finish the store-domain handoff now that a real account session exists.
+                await store_login_handoff(page, timeout_seconds=25)
+            return True
+        if seeded is not None:
+            logger.warning(
+                "Session vault: exchange-code seeding rejected | status={} | body={}",
+                seeded.status,
+                await _api_text(seeded, 160),
+            )
 
     token = await access_token()
     if not token:
