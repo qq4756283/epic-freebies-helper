@@ -934,9 +934,67 @@ class EpicGames:
             raise RuntimeError("button bounding box is unavailable")
         await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
+    TAKEOVER_DISMISS_SELECTORS = (
+        "#onetrust-accept-btn-handler",
+        "button:has-text('Accept All')",
+        "[data-testid='takeover-close']",
+        "[aria-label='Close']",
+        "[data-testid='close-button']",
+        "button:has-text('Got it')",
+        "button:has-text('No thanks')",
+        "button:has-text('Continue')",
+    )
+
+    @staticmethod
+    async def _dismiss_takeover(page: Page) -> bool:
+        """Clear any store "takeover" layer that swallows clicks on the CTA.
+
+        The 2026-10 storefront wraps promotions in a takeover container
+        (``_container_... _takeover_...``) which the debug log shows intercepting pointer
+        events on the Get button, so every click variant either failed or hit the overlay.
+        """
+        cleared = False
+        with suppress(Exception):
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(250)
+
+        for selector in EpicGames.TAKEOVER_DISMISS_SELECTORS:
+            try:
+                candidate = page.locator(selector).first
+                if await candidate.is_visible(timeout=800):
+                    await candidate.click(timeout=2500)
+                    logger.info("Dismissed store takeover via {}", selector)
+                    cleared = True
+                    await page.wait_for_timeout(400)
+                    break
+            except Exception:
+                continue
+
+        # Belt and braces: stop any remaining takeover layer from intercepting pointers.
+        with suppress(Exception):
+            neutralised = await page.evaluate(
+                """() => {
+                    let n = 0;
+                    document.querySelectorAll('[class*="_takeover"]').forEach((el) => {
+                        if (el && el.style && getComputedStyle(el).pointerEvents !== 'none') {
+                            el.style.pointerEvents = 'none';
+                            n += 1;
+                        }
+                    });
+                    return n;
+                }"""
+            )
+            if neutralised:
+                logger.info("Neutralised {} store takeover layer(s)", neutralised)
+                cleared = True
+        return cleared
+
     async def _click_purchase_button(self, page: Page, purchase_btn, url: str) -> bool:
         with suppress(Exception):
             await purchase_btn.scroll_into_view_if_needed(timeout=2000)
+
+        if await EpicGames._dismiss_takeover(page):
+            logger.debug("Store takeover cleared before clicking - {}", url)
 
         click_attempts = (
             ("standard", lambda: purchase_btn.click(timeout=5000, no_wait_after=True)),
