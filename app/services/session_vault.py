@@ -54,6 +54,10 @@ OAUTH_TOKEN_URL = os.getenv(
 # for this client are the ones ``id/api/exchange`` accepts, which is why seeding uses it
 # while minting has to keep the launcher client (that pair is what grants a refresh token).
 WEB_CLIENT_ID = os.getenv("EPIC_WEB_CLIENT_ID", "007c0bfe154c4f5396648f013c641dcf")
+# The store domain (store.epicgames.com) runs its own OAuth client; its silent-login URL is
+# /auth/login?returnPath=...&clientId=<this>&prompt=none. Minting codes for the web client
+# does not create a store session, which is why clicking Get bounced to switch-account.
+STORE_CLIENT_ID = os.getenv("EPIC_STORE_CLIENT_ID", "875a3b57d3a640a6b7f9b4e883463ab4")
 WEB_REDIRECT_URL = "https://www.epicgames.com/id/api/redirect"
 WEB_EXCHANGE_URL = "https://www.epicgames.com/id/api/exchange"
 ORDER_HISTORY_URL = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
@@ -386,7 +390,7 @@ async def _seed(context: Any, token: str) -> bool:
     #  * id/api/redirect is issued for the *cookie* session, and adding a bearer header
     #    makes it answer 400 "authorization is invalid" even for a valid token.
     # So try cookie-session first, then bearer, for the web client, then the launcher.
-    for client_id in (WEB_CLIENT_ID, LAUNCHER_CLIENT_ID):
+    for client_id in (STORE_CLIENT_ID, WEB_CLIENT_ID, LAUNCHER_CLIENT_ID):
         for auth_header in ({}, {"Authorization": f"bearer {token}"}):
             redirect = await context.request.get(
                 WEB_REDIRECT_URL,
@@ -432,6 +436,36 @@ async def _seed(context: Any, token: str) -> bool:
             exchange.status,
             await _api_text(exchange),
         )
+    return False
+
+
+STORE_SILENT_LOGIN_URL = (
+    "https://store.epicgames.com/auth/login?returnPath=%2Fen-US%2Ffree-games&prompt=none"
+)
+
+
+async def store_silent_login(page: Any, timeout_seconds: int = 20) -> bool:
+    """Finish the store-domain SSO with ``prompt=none``.
+
+    An account session on www.epicgames.com is not a store session: store.epicgames.com
+    authenticates as its own OAuth client (875a3b57...), and without this handoff every
+    Get click is redirected to /id/login/switch-account.
+    """
+    try:
+        await page.goto(STORE_SILENT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    except Exception as err:
+        logger.warning("Store silent login navigation failed | error={!r}", err)
+        return False
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        url = page.url or ""
+        if "/auth/login" not in url and "switch-account" not in url:
+            logger.success("Store silent login completed | url={}", url)
+            return True
+        await page.wait_for_timeout(700)
+
+    logger.warning("Store silent login did not complete | url={}", page.url)
     return False
 
 

@@ -263,6 +263,16 @@ class EpicAgent:
         for attempt in range(1, attempts + 1):
             try:
                 await self.page.goto(URL_CLAIM, wait_until="domcontentloaded", timeout=45000)
+                # The store keeps its own session: if it bounced us to auth/login (or the
+                # switch-account page), finish the silent SSO once and come back.
+                if "/auth/login" in (self.page.url or "") or "switch-account" in (
+                    self.page.url or ""
+                ):
+                    logger.warning(
+                        "Store bounced the claim page to its login flow; running silent store login"
+                    )
+                    await session_vault.store_silent_login(self.page)
+                    await self.page.goto(URL_CLAIM, wait_until="domcontentloaded", timeout=45000)
                 return
             except (PlaywrightTimeoutError, PlaywrightError) as err:
                 logger.warning(

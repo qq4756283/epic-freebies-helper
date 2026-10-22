@@ -696,6 +696,37 @@ class EpicAuthorization:
             logger.warning("Failed to verify Epic account session via order history: {!r}", err)
             return False
 
+    STORE_SILENT_LOGIN_URL = (
+        "https://store.epicgames.com/auth/login?returnPath=%2Fen-US%2Ffree-games&prompt=none"
+    )
+
+    async def _store_silent_login(self, timeout_seconds: int = 20) -> bool:
+        """Complete the store-domain handoff through Epic's silent SSO.
+
+        An account session on www.epicgames.com does not create a store session on
+        store.epicgames.com. Without this step the store's own OAuth client (875a3b57...)
+        sends every Get click to /id/login/switch-account, which is exactly what the
+        2026-10-22 debug dump shows.
+        """
+        try:
+            await self.page.goto(
+                self.STORE_SILENT_LOGIN_URL, wait_until="domcontentloaded", timeout=30000
+            )
+        except Exception as err:
+            logger.warning("Store silent login navigation failed | error={!r}", err)
+            return False
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            url = self.page.url or ""
+            if "/auth/login" not in url and "switch-account" not in url:
+                logger.success("Store silent login completed | url={}", url)
+                return True
+            await self.page.wait_for_timeout(700)
+
+        logger.warning("Store silent login did not complete | url={}", self.page.url)
+        return False
+
     async def _settle_after_login(self, timeout_seconds: int = 30) -> None:
         """Let the post-login redirect chain finish before judging the store session.
 
@@ -718,12 +749,8 @@ class EpicAuthorization:
             self.page.url,
         )
         with suppress(Exception):
-            await self.page.goto(
-                "https://store.epicgames.com/en-US/login",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            await self.page.wait_for_timeout(2500)
+            await self._store_silent_login()
+            await self.page.wait_for_timeout(1500)
 
     async def _ensure_store_session_ready(self, timeout_seconds: int = 45) -> None:
         await self._settle_after_login()
@@ -768,12 +795,8 @@ class EpicAuthorization:
                     # session. The store's own /login URL bounces through the account
                     # service and completes the handoff without a second captcha.
                     with suppress(Exception):
-                        await self.page.goto(
-                            "https://store.epicgames.com/en-US/login",
-                            wait_until="domcontentloaded",
-                            timeout=30000,
-                        )
-                        await self.page.wait_for_timeout(3000)
+                        await self._store_silent_login()
+                        await self.page.wait_for_timeout(1500)
                     minted = await session_vault.mint_from_context(self.page.context)
                     if minted:
                         await session_vault.try_seed(self.page.context)
