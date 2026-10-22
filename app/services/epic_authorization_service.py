@@ -1039,10 +1039,18 @@ class EpicAuthorization:
                 return False
 
             if "true" == await self._get_login_status(timeout_ms=3000, warn_timeout=False):
-                logger.success("Epic Games is already logged in")
-                self._mark_profile_healthy()
-                await session_vault.ensure_state(self.page.context)
-                return True
+                # The nav marker only reflects the *account* session. The purchase flow needs
+                # a store session, and without it every Get click is bounced to
+                # switch-account. Verify the store side once before declaring victory.
+                logger.warning("Nav reports logged in; verifying the store session before claiming")
+                if await self._store_silent_login():
+                    logger.success("Epic Games is already logged in (store session verified)")
+                    self._mark_profile_healthy()
+                    await session_vault.ensure_state(self.page.context)
+                    return True
+                logger.warning(
+                    "Store session is missing despite an account session; falling through to login"
+                )
 
             # A cached profile can hold valid account cookies while the storefront marker
             # still reads false. Probe the account API before paying for a login attempt:
