@@ -868,6 +868,15 @@ class EpicAuthorization:
             await self.page.goto(point_url, wait_until="domcontentloaded")
             await self.page.wait_for_timeout(1500)
 
+            # The store entry can complete silently when the account session is alive:
+            # it redirects back to the store already signed in, and no login form ever
+            # appears. Check that before waiting for a form that will not show up.
+            if "true" == await self._get_login_status(timeout_ms=4000, warn_timeout=False):
+                logger.success(
+                    "Store login entry produced a store session directly | url={}", self.page.url
+                )
+                return True
+
             if "switch-account" in (self.page.url or ""):
                 logger.warning(
                     "Epic asks which account to continue with; confirming the known account"
@@ -885,7 +894,11 @@ class EpicAuthorization:
                 )
                 return True
 
-            await self._wait_for_login_form(point_url)
+            try:
+                await self._wait_for_login_form(point_url)
+            except Exception:
+                await session_vault._dump_page_html(self.page, "store-login-form-missing")
+                raise
 
             # 1. 使用电子邮件地址登录
             email_input = self.page.locator("#email")
