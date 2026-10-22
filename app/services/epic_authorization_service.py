@@ -815,6 +815,33 @@ class EpicAuthorization:
             f"current_url={self.page.url}"
         )
 
+    async def _ensure_email_editable(self, email_input, point_url: str) -> bool:
+        """Make sure the email field can actually be typed into.
+
+        Epic remembers the last address and renders it readonly, with an empty value. The
+        fill then times out and the whole attempt dies (run 39807942464). Clearing the
+        remembered form is the only reliable way back to the normal entry state.
+        """
+        try:
+            if await email_input.is_editable(timeout=3000):
+                return True
+        except Exception:
+            pass
+
+        logger.warning(
+            "Epic login email field is readonly (remembered account); "
+            "clearing cookies and reloading the login entry"
+        )
+        with suppress(Exception):
+            await self.page.context.clear_cookies()
+        with suppress(Exception):
+            await self.page.goto(point_url, wait_until="domcontentloaded")
+            await self._wait_for_login_form(point_url)
+        try:
+            return await email_input.is_editable(timeout=8000)
+        except Exception:
+            return False
+
     async def _login(self) -> bool | None:
         # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
@@ -833,6 +860,11 @@ class EpicAuthorization:
 
             # 1. 使用电子邮件地址登录
             email_input = self.page.locator("#email")
+            if not await self._ensure_email_editable(email_input, point_url):
+                raise RuntimeError(
+                    "Epic login form kept the email field readonly even after resetting the "
+                    "remembered account state"
+                )
             await email_input.fill(settings.EPIC_EMAIL)
 
             # 2. 点击继续按钮
