@@ -871,7 +871,7 @@ class EpicAuthorization:
             # The store entry can complete silently when the account session is alive:
             # it redirects back to the store already signed in, and no login form ever
             # appears. Check that before waiting for a form that will not show up.
-            if "true" == await self._get_login_status(timeout_ms=4000, warn_timeout=False):
+            if await session_vault.store_logged_in(self.page):
                 logger.success(
                     "Store login entry produced a store session directly | url={}", self.page.url
                 )

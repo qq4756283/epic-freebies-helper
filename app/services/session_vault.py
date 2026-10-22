@@ -445,7 +445,7 @@ STORE_SILENT_LOGIN_URL = (
 )
 # Entry point that produces a store session as a by-product of logging in: the store
 # redirects to the account service with its own client id and comes back with a code.
-STORE_LOGIN_ENTRY = "https://store.epicgames.com/en-US/login"
+STORE_LOGIN_ENTRY = "https://store.epicgames.com/login"
 
 _SWITCH_ACCOUNT_SELECTORS = (
     "[data-testid='switch-account-continue']",
@@ -472,6 +472,47 @@ async def _dump_page_html(page: Any, name: str, limit: int = 200_000) -> None:
         logger.warning("Dumped {} DOM | path={} | url={}", name, target, page.url)
     except OSError as err:
         logger.warning("Could not write {} DOM | error={!r}", name, err)
+
+
+async def store_logged_in(page: Any) -> bool:
+    """Whether the store domain currently has a session.
+
+    The old ``<egs-navigation isloggedin>`` attribute no longer exists on the 2026 React
+    storefront (the dumped home page has no such element), so this probes the account menu
+    markers first and only then falls back to the legacy attribute.
+    """
+    for selector in (
+        "[data-testid='user-menu']",
+        "[data-testid='account-menu']",
+        "[data-testid='avatar']",
+        "button[aria-label*='Account']",
+        "a[href*='/account/personal']",
+    ):
+        try:
+            if await page.locator(selector).first.is_visible(timeout=800):
+                return True
+        except Exception:
+            continue
+
+    try:
+        value = await page.locator("//egs-navigation").get_attribute("isloggedin", timeout=1500)
+        if value == "true":
+            return True
+    except Exception:
+        pass
+
+    for selector in (
+        "a[href*='/login']",
+        "button:has-text('Sign In')",
+        "a:has-text('Sign In')",
+        "button:has-text('Sign in')",
+    ):
+        try:
+            if await page.locator(selector).first.is_visible(timeout=800):
+                return False
+        except Exception:
+            continue
+    return False
 
 
 async def confirm_switch_account(page: Any, timeout_seconds: int = 20) -> bool:
@@ -530,12 +571,15 @@ async def store_login_handoff(page: Any, timeout_seconds: int = 40) -> bool:
             if not await confirm_switch_account(page, timeout_seconds=15):
                 return False
             continue
-        if "/auth/login" in url:
-            await page.wait_for_timeout(700)
-            continue
-        if "store.epicgames.com" in url and "/login" not in url:
+        if await store_logged_in(page):
             logger.success("Store login handoff completed | url={}", url)
             return True
+        if "epicgames.com/id/login" in url:
+            logger.info(
+                "Store login entry shows the credential form; the caller handles login | url={}",
+                url,
+            )
+            return False
         await page.wait_for_timeout(700)
 
     await _dump_page_html(page, "store-login-handoff")
