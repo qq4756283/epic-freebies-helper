@@ -6,8 +6,8 @@ slot was missed again. The cheap fix is redundancy (several cron slots per day) 
 gate that makes each extra slot a no-op:
 
 * a verified claim inside the last ``CLAIM_WINDOW_DAYS`` days -> skip (nothing to do);
-* an authentication attempt already recorded today (Asia/Shanghai) -> skip, because
-  hammering Epic escalates its risk score (measured on 2026-10-21);
+* an authentication attempt inside the last ``ATTEMPT_COOLDOWN_HOURS`` hours -> skip, so
+  the account is never hammered (Epic raises its risk score otherwise);
 * otherwise -> run.
 
 Stdlib only, so the gate job needs no uv/python setup and costs ~10 seconds.
@@ -27,6 +27,7 @@ RUNTIME_OUTCOME = ROOT.joinpath("app", "volumes", "runtime", "run-outcome.json")
 OUTPUT_NAME = "run"
 TZ = timezone(timedelta(hours=8))  # Asia/Shanghai
 CLAIM_WINDOW_DAYS = int(os.getenv("CLAIM_WINDOW_DAYS", "5"))
+ATTEMPT_COOLDOWN_HOURS = float(os.getenv("ATTEMPT_COOLDOWN_HOURS", "3.5"))
 VERIFIED_OUTCOMES = {"claimed_ok"}
 ATTEMPT_OUTCOMES = {
     "auth_failed_captcha",
@@ -69,16 +70,19 @@ def _has_recent_claim(history: list[dict]) -> tuple[bool, str]:
     return False, "no recent verified claim"
 
 
-def _attempted_today(history: list[dict]) -> tuple[bool, str]:
-    today = datetime.now(TZ).date()
+def _recent_attempt(history: list[dict]) -> tuple[bool, str]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=ATTEMPT_COOLDOWN_HOURS)
     for entry in reversed(history):
         outcome = entry.get("outcome")
         if outcome not in ATTEMPT_OUTCOMES:
             continue
         at = _parse_at(entry.get("at"))
-        if at and at.astimezone(TZ).date() == today:
-            return True, f"already attempted today ({outcome} at {entry.get('at')})"
-    return False, "no attempt today"
+        if at and at >= cutoff:
+            return (
+                True,
+                f"attempted {entry.get('at')} ({outcome}), cooldown {ATTEMPT_COOLDOWN_HOURS}h",
+            )
+    return False, f"no attempt in the last {ATTEMPT_COOLDOWN_HOURS}h"
 
 
 def main() -> int:
@@ -88,7 +92,7 @@ def main() -> int:
         decision, reason = True, "GATE_FORCE set"
     else:
         claimed, claim_reason = _has_recent_claim(history)
-        attempted, attempt_reason = _attempted_today(history)
+        attempted, attempt_reason = _recent_attempt(history)
         if claimed:
             decision, reason = False, claim_reason
         elif attempted:
