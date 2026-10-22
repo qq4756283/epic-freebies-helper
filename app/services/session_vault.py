@@ -410,6 +410,43 @@ async def request_exchange_code() -> str | None:
     return code or None
 
 
+async def _redeem_via_page(page: Any, code: str) -> bool:
+    """Spend the exchange code from inside the portal page.
+
+    ``context.request`` is same-cookie but not same-origin: no Origin/Referer and no portal
+    CSRF wiring, which is exactly why it kept answering csrf_token_invalid. A fetch issued by
+    the page itself carries everything the site's own request carries.
+    """
+    try:
+        result = await page.evaluate(
+            """async ({ code }) => {
+                const response = await fetch("/id/api/exchange", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    credentials: "include",
+                    body: JSON.stringify({ code }),
+                });
+                const text = await response.text();
+                return { status: response.status, text: text.slice(0, 200) };
+            }""",
+            {"code": code},
+        )
+    except Exception as err:
+        logger.warning("Session vault: page-based exchange failed | error={!r}", err)
+        return False
+
+    status = (result or {}).get("status", 0)
+    if status and status < 400:
+        logger.success("Session vault: page-based exchange accepted | status={}", status)
+        return True
+    logger.info(
+        "Session vault: page-based exchange rejected | status={} | body={}",
+        status,
+        (result or {}).get("text", "")[:120],
+    )
+    return False
+
+
 async def _redeem_exchange_code(context: Any, code: str) -> bool:
     """Spend the exchange code at whichever endpoint still exists.
 
@@ -494,7 +531,12 @@ async def try_seed(context: Any) -> bool:
     # Preferred path: documented launcher -> web handoff (no login page, no captcha).
     exchange_code = await request_exchange_code()
     if exchange_code:
-        if await _redeem_exchange_code(context, exchange_code):
+        redeemed = False
+        if page is not None:
+            redeemed = await _redeem_via_page(page, exchange_code)
+        if not redeemed:
+            redeemed = await _redeem_exchange_code(context, exchange_code)
+        if redeemed:
             if page is not None:
                 # Finish the store-domain handoff now that a real account session exists.
                 await store_login_handoff(page, timeout_seconds=25)
