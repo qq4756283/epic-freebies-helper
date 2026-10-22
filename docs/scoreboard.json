@@ -338,5 +338,29 @@
       "source": "browser_login",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-22T18:22:50Z",
+    "run_id": "39829152607",
+    "event": "workflow_dispatch",
+    "outcome": "unknown",
+    "stage": "",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "ok",
+        "ms": 7116.2
+      },
+      {
+        "stage": "claim",
+        "result": "failed",
+        "ms": 550269.7
+      }
+    ],
+    "session": {
+      "source": "browser_login",
+      "has_refresh_token": true
+    }
   }
 ]
