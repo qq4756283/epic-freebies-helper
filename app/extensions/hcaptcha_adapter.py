@@ -225,13 +225,15 @@ async def _wait_for_challenge_image(frame_challenge: Any, timeout_ms: int = 8000
     deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
     while asyncio.get_event_loop().time() < deadline:
         try:
+            # evaluate() runs inside the challenge frame already, so use document directly -
+            # passing the frame as an argument made contentDocument undefined and this check
+            # could never return true.
             ready = await frame_challenge.evaluate(
-                """(frame) => {
-                    const doc = frame.contentDocument || frame.ownerDocument;
-                    if (!doc) return false;
-                    const img = doc.querySelector(".challenge-view img, .challenge-view canvas, img");
+                """() => {
+                    const img = document.querySelector(".challenge-view img, img");
+                    const canvas = document.querySelector(".challenge-view canvas, canvas");
+                    if (canvas && canvas.width > 16 && canvas.height > 16) return true;
                     if (!img) return false;
-                    if (img.tagName === "CANVAS") return img.width > 16 && img.height > 16;
                     return Boolean(img.complete) && (img.naturalWidth || 0) > 16;
                 }"""
             )
