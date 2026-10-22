@@ -68,6 +68,15 @@ WEB_CLIENT_ID = os.getenv("EPIC_WEB_CLIENT_ID", "007c0bfe154c4f5396648f013c641dc
 STORE_CLIENT_ID = os.getenv("EPIC_STORE_CLIENT_ID", "875a3b57d3a640a6b7f9b4e883463ab4")
 WEB_REDIRECT_URL = "https://www.epicgames.com/id/api/redirect"
 WEB_EXCHANGE_URL = "https://www.epicgames.com/id/api/exchange"
+# The 2026 site moved this endpoint (id/api/exchange answers 404). Try the known shapes and
+# log every status, so one run tells us which one still exists.
+WEB_EXCHANGE_ENDPOINTS = (
+    "https://www.epicgames.com/id/api/exchange",
+    "https://accounts.epicgames.com/id/api/exchange",
+    "https://www.epicgames.com/account/v2/exchange",
+    "https://store.epicgames.com/auth/exchange",
+    "https://www.epicgames.com/id/api/session",
+)
 ORDER_HISTORY_URL = "https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory"
 
 STATE_PATH = (
@@ -401,6 +410,39 @@ async def request_exchange_code() -> str | None:
     return code or None
 
 
+async def _redeem_exchange_code(context: Any, code: str) -> bool:
+    """Spend the exchange code at whichever endpoint still exists."""
+    for url in WEB_EXCHANGE_ENDPOINTS:
+        for method in ("get", "post"):
+            try:
+                if method == "get":
+                    response = await context.request.get(
+                        url, params={"code": code}, timeout=HTTP_TIMEOUT_SECONDS * 1000
+                    )
+                else:
+                    response = await context.request.post(
+                        url, form={"code": code}, timeout=HTTP_TIMEOUT_SECONDS * 1000
+                    )
+            except Exception as err:
+                logger.info("Session vault: exchange {} {} failed | error={!r}", method, url, err)
+                continue
+            if response.status < 400:
+                logger.success(
+                    "Session vault: exchange code accepted | {} {} | status={}",
+                    method.upper(),
+                    url,
+                    response.status,
+                )
+                return True
+            logger.info(
+                "Session vault: exchange {} {} rejected | status={}",
+                method.upper(),
+                url,
+                response.status,
+            )
+    return False
+
+
 async def try_seed(context: Any) -> bool:
     """Turn the stored token into browser cookies so the login page never renders.
 
@@ -413,31 +455,12 @@ async def try_seed(context: Any) -> bool:
     # Preferred path: documented launcher -> web handoff (no login page, no captcha).
     exchange_code = await request_exchange_code()
     if exchange_code:
-        try:
-            seeded = await context.request.get(
-                WEB_EXCHANGE_URL,
-                params={"code": exchange_code},
-                timeout=HTTP_TIMEOUT_SECONDS * 1000,
-            )
-        except Exception as err:
-            logger.warning("Session vault: exchange-code seeding failed | error={!r}", err)
-            seeded = None
-        if seeded is not None and seeded.status < 400:
-            logger.success(
-                "Session vault: account session seeded from the exchange code | status={}",
-                seeded.status,
-            )
+        if await _redeem_exchange_code(context, exchange_code):
             page = context.pages[0] if getattr(context, "pages", None) else None
             if page is not None:
                 # Finish the store-domain handoff now that a real account session exists.
                 await store_login_handoff(page, timeout_seconds=25)
             return True
-        if seeded is not None:
-            logger.warning(
-                "Session vault: exchange-code seeding rejected | status={} | body={}",
-                seeded.status,
-                await _api_text(seeded, 160),
-            )
 
     token = await access_token()
     if not token:
