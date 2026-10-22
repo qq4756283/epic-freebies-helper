@@ -594,6 +594,10 @@ async def _seed(context: Any, token: str) -> bool:
         return False
 
     for code in codes:
+        page = context.pages[0] if getattr(context, "pages", None) else None
+        if page is not None and await _redeem_code_at_store(page, code):
+            return True
+
         exchange = await context.request.get(
             WEB_EXCHANGE_URL,
             params={"code": code},
@@ -650,6 +654,70 @@ async def _dump_page_html(page: Any, name: str, limit: int = 200_000) -> None:
         logger.warning("Dumped {} DOM | path={} | url={}", name, target, page.url)
     except OSError as err:
         logger.warning("Could not write {} DOM | error={!r}", name, err)
+
+
+STORE_AUTH_CODE_ENTRIES = (
+    "https://store.epicgames.com/auth/login?returnPath=%2Fen-US%2Ffree-games&code={code}",
+    "https://store.epicgames.com/auth/login?code={code}",
+    "https://store.epicgames.com/en-US/login?code={code}",
+)
+
+
+async def _redeem_code_at_store(page: Any, code: str) -> bool:
+    """Hand an authorization code to the store's own auth entry.
+
+    ``id/api/exchange`` is unusable (404/409 CSRF), but the store keeps its own /auth/login
+    endpoint - the same one Epic redirects to. If it accepts the code, the store session is
+    created with no login page and no captcha.
+    """
+    for template in STORE_AUTH_CODE_ENTRIES:
+        url = template.format(code=code)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(1500)
+        except Exception as err:
+            logger.info("Session vault: store auth entry navigation failed | error={!r}", err)
+            continue
+        if await store_logged_in(page):
+            logger.success(
+                "Session vault: store session established from an authorization code | url={}",
+                (page.url or "")[:140],
+            )
+            return True
+        logger.info(
+            "Session vault: store auth entry did not sign in | url={}", (page.url or "")[:140]
+        )
+    return False
+
+
+async def establish_store_session(context: Any, page: Any) -> bool:
+    """Create the store session from a live account session.
+
+    With account cookies present, id/api/redirect issues an authorization code for the store
+    client; handing that code to the store's own /auth/login entry creates the store session
+    without any login form or captcha. This is the replacement for id/api/exchange, which the
+    2026 portal only answers with 404/409.
+    """
+    try:
+        response = await context.request.get(
+            WEB_REDIRECT_URL,
+            params={"clientId": STORE_CLIENT_ID, "responseType": "code"},
+            timeout=HTTP_TIMEOUT_SECONDS * 1000,
+        )
+    except Exception as err:
+        logger.warning("Session vault: store code request failed | error={!r}", err)
+        return False
+
+    code = _extract_code(await _api_json(response)) if response.status == 200 else None
+    if not code:
+        logger.info(
+            "Session vault: no authorization code for the store client | status={}",
+            response.status,
+        )
+        return False
+
+    logger.info("Session vault: store authorization code acquired")
+    return await _redeem_code_at_store(page, code)
 
 
 async def store_logged_in(page: Any) -> bool:

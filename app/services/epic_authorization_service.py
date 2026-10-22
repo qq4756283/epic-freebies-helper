@@ -701,14 +701,17 @@ class EpicAuthorization:
     )
 
     async def _store_silent_login(self, timeout_seconds: int = 40) -> bool:
-        """Complete the store-domain handoff.
+        """Make the store domain own a session.
 
-        Delegates to the vault, which walks the store login entry, confirms the
-        switch-account prompt when Epic asks, and waits for the store domain to come back
-        with a session. The old ``/auth/login?prompt=none`` URL does not redirect on its
-        own, so it is no longer used.
+        Order matters:
+        1. authorization code straight to store /auth/login (no form, no captcha) - works
+           whenever the account session is alive;
+        2. OIDC silent authorize, then the store login entry (which may need credentials).
         """
-        return await session_vault.store_login_handoff(self.page, timeout_seconds=timeout_seconds)
+        page = self.page
+        if await session_vault.establish_store_session(page.context, page):
+            return True
+        return await session_vault.store_login_handoff(page, timeout_seconds=timeout_seconds)
 
     async def _settle_after_login(self, timeout_seconds: int = 30) -> None:
         """Let the post-login redirect chain finish before judging the store session.
@@ -860,13 +863,17 @@ class EpicAuthorization:
             self._drain_queue(self._login_error_signal)
             self._drain_queue(self._is_refresh_csrf_signal)
 
-            # Enter through the store, not the account portal: store.epicgames.com runs its
-            # own OAuth client (875a3b57...) and only creates its session when the login
-            # round trip starts there. Entering at /account/personal leaves the store
-            # logged out, so every Get click is bounced to switch-account.
-            point_url = session_vault.STORE_LOGIN_ENTRY
+            # Enter through the account portal: measured 2 accepted logins out of 6 there,
+            # versus 0 out of 4 through the store entry. The store session is then created
+            # from the resulting account session by handing an authorization code to the
+            # store's /auth/login (see _store_silent_login), so the entry point no longer
+            # has to be the store itself.
+            point_url = (
+                "https://www.epicgames.com/account/personal"
+                "?lang=en-US&productName=egs&sessionInvalidated=true"
+            )
             await self.page.goto(point_url, wait_until="domcontentloaded")
-            await self.page.wait_for_timeout(1500)
+            await self.page.wait_for_timeout(1200)
 
             # The store entry can complete silently when the account session is alive:
             # it redirects back to the store already signed in, and no login form ever
