@@ -602,5 +602,25 @@
       "source": "browser_login",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-22T22:11:32Z",
+    "run_id": "39862295024",
+    "event": "workflow_dispatch",
+    "outcome": "auth_failed_captcha",
+    "stage": "auth",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "failed",
+        "ms": 287512.7,
+        "max_attempts": 1
+      }
+    ],
+    "session": {
+      "source": "browser_login",
+      "has_refresh_token": true
+    }
   }
 ]
