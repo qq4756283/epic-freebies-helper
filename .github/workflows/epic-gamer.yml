@@ -91,8 +91,21 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 xvfb libxml2-dev libxslt-dev
 
+      # PyPI 偶发抖动会让 uv sync 直接失败（2026-10-22 两次：cryptography / pytz 下载失败），
+      # 那与项目无关，却会废掉整轮运行。这里重试三次再说。
       - name: Install dependencies
-        run: uv sync
+        env:
+          UV_HTTP_TIMEOUT: '90'
+        run: |
+          for attempt in 1 2 3; do
+            if uv sync; then
+              exit 0
+            fi
+            echo "uv sync failed (attempt ${attempt}/3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "uv sync failed after 3 attempts"
+          exit 1
 
       - name: Validate hCaptcha protocol contract
         env:

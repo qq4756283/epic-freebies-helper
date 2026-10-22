@@ -57,7 +57,18 @@ jobs:
           sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 xvfb libxml2-dev libxslt-dev
 
       - name: Install dependencies
-        run: uv sync
+        env:
+          UV_HTTP_TIMEOUT: '90'
+        run: |
+          for attempt in 1 2 3; do
+            if uv sync; then
+              exit 0
+            fi
+            echo "uv sync failed (attempt ${attempt}/3); retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "uv sync failed after 3 attempts"
+          exit 1
 
       - name: Install Camoufox
         continue-on-error: true
