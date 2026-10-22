@@ -882,10 +882,23 @@ class EpicAuthorization:
                     "Epic asks which account to continue with; confirming the known account"
                 )
                 switch_outcome = await session_vault.confirm_switch_account(
-                    self.page, email=settings.EPIC_EMAIL
+                    self.page, email=settings.EPIC_EMAIL, timeout_seconds=12
                 )
                 if switch_outcome == "failed":
-                    raise RuntimeError("Epic switch-account prompt could not be confirmed")
+                    # The tile on "Confirm Your Account" ignores both synthetic and trusted
+                    # clicks (2026-10-23), so stop fighting it: drop the account session and
+                    # log in from scratch through the store entry, which yields the store
+                    # session and a normal credential form.
+                    logger.warning(
+                        "switch-account could not be confirmed; clearing the account session "
+                        "and logging in from scratch through the store entry"
+                    )
+                    with suppress(Exception):
+                        await self.page.context.clear_cookies()
+                    with suppress(Exception):
+                        await self.page.goto(point_url, wait_until="domcontentloaded")
+                        await self.page.wait_for_timeout(1500)
+                    switch_outcome = "form"
                 if switch_outcome == "confirmed":
                     deadline = time.monotonic() + 30
                     while time.monotonic() < deadline:
