@@ -1566,6 +1566,35 @@ class EpicGames:
         await self._capture_purchase_debug(page, "checkout_challenge_extended_probe", url)
         return True
 
+    async def _load_order_history_payload(self) -> dict | None:
+        """Order-history reader for the claim side.
+
+        EpicAgent has its own copy; this one is what claim confirmation calls, and it was
+        missing entirely, so every reconciliation that reached the order-history step died
+        with AttributeError instead of answering.
+        """
+        payload = await session_vault.load_order_history(self.page.context)
+        if payload is not None:
+            return payload
+
+        logger.warning(
+            "Order history JSON request unavailable; falling back to the legacy page scrape"
+        )
+        try:
+            await self.page.goto(URL_ORDER_HISTORY, wait_until="domcontentloaded", timeout=15000)
+            text_content = ""
+            with suppress(Exception):
+                text_content = await self.page.text_content("//pre", timeout=5000) or ""
+            if not text_content:
+                text_content = await self.page.locator("body").inner_text(timeout=5000)
+            data = json.loads(text_content or "{}")
+            if not isinstance(data.get("orders"), list):
+                raise RuntimeError("Epic order history payload did not contain an orders list")
+            return data
+        except Exception as err:
+            logger.warning("Failed to load Epic order history session probe: {!r}", err)
+            return None
+
     async def _is_promotion_in_order_history(self, promotion: PromotionGame) -> bool:
         payload = await self._load_order_history_payload()
         if payload is None:
