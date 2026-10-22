@@ -2072,24 +2072,30 @@ class EpicGames:
             # Epic 按钮通常有 'purchase-cta-button' 这个 TestID
             purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
 
-            # 2. 如果没找到主按钮，尝试找“库中”状态
+            # 2. 等主按钮真正渲染出来再判断状态。
+            # is_visible() 不等待：页面还在水合时它会立刻返回 False，随后用整页文本兜底就会
+            # 把"按钮还没出来"误判成"已在库"。2026-10-22 的实际后果是本该领取的
+            # Sker Ritual / Home 被跳过（新上架游戏不可能已在库）。
             try:
-                if not await purchase_btn.is_visible():
-                    # 再次检查是否在库中 (有时按钮不叫 purchase-cta，而是简单的 disabled button)
-                    all_text = (await page.locator("body").text_content() or "").upper()
-                    if any(marker in all_text for marker in owned_markers):
-                        logger.success(
-                            "Game already claimed / already in library (page text scan) - "
-                            f"title='{game_title}' url='{url}'"
-                        )
-                        self._already_owned += 1
-                        continue
-                    logger.warning(f"Could not find any purchase button - {url=}")
-                    await self._capture_purchase_debug(page, "button_missing", url)
-                    failed_urls.append(url)
-                    continue
+                await purchase_btn.wait_for(state="visible", timeout=15000)
             except Exception:
-                pass
+                logger.warning(
+                    "Purchase CTA did not appear within 15s | title='{}' url='{}'",
+                    game_title,
+                    url,
+                )
+
+            if not await purchase_btn.is_visible():
+                # 按钮缺失只说明"状态未知"，不等于"已拥有"。宁可这一轮报失败让下一次重试，
+                # 也不要把可领取的东西静默跳过。
+                logger.warning(
+                    "Could not find any purchase button; treating as unconfirmed | title='{}' url='{}'",
+                    game_title,
+                    url,
+                )
+                await self._capture_purchase_debug(page, "button_missing", url)
+                failed_urls.append(url)
+                continue
 
             # 3. 获取按钮上下文
             btn_text, container_text, disabled, aria_disabled = (
