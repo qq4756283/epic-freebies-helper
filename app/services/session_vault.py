@@ -428,12 +428,15 @@ async def _redeem_exchange_code(context: Any, code: str) -> bool:
 
     attempts: list[tuple[str, str, dict[str, Any]]] = []
     for url in WEB_EXCHANGE_ENDPOINTS:
-        attempts.append(("get", url, {"params": {"code": code}}))
+        # JSON POST with the CSRF header is the shape the portal actually wants (409
+        # csrf_token_invalid proved the route exists and only the header was missing).
         for payload in ({"code": code}, {"exchangeCode": code}):
             headers = {"Content-Type": "application/json"}
             if xsrf:
                 headers["x-xsrf-token"] = xsrf
+                headers["x-csrf-token"] = xsrf
             attempts.append(("post", url, {"json": payload, "headers": headers}))
+        attempts.append(("get", url, {"params": {"code": code}}))
         attempts.append(("post", url, {"form": {"code": code}}))
 
     for method, url, kwargs in attempts:
@@ -476,11 +479,22 @@ async def try_seed(context: Any) -> bool:
     if not enabled():
         return False
 
+    # The exchange endpoint requires the portal CSRF cookie, so open a portal page first and
+    # only then mint the (short-lived) exchange code.
+    page = context.pages[0] if getattr(context, "pages", None) else None
+    if page is not None:
+        try:
+            await page.goto(
+                "https://www.epicgames.com/id/login", wait_until="domcontentloaded", timeout=30000
+            )
+            await page.wait_for_timeout(800)
+        except Exception as err:
+            logger.info("Session vault: portal warm-up skipped | error={!r}", err)
+
     # Preferred path: documented launcher -> web handoff (no login page, no captcha).
     exchange_code = await request_exchange_code()
     if exchange_code:
         if await _redeem_exchange_code(context, exchange_code):
-            page = context.pages[0] if getattr(context, "pages", None) else None
             if page is not None:
                 # Finish the store-domain handoff now that a real account session exists.
                 await store_login_handoff(page, timeout_seconds=25)
