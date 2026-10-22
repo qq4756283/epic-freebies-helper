@@ -881,18 +881,23 @@ class EpicAuthorization:
                 logger.warning(
                     "Epic asks which account to continue with; confirming the known account"
                 )
-                if not await session_vault.confirm_switch_account(self.page):
-                    raise RuntimeError("Epic switch-account prompt could not be confirmed")
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    url = self.page.url or ""
-                    if "switch-account" not in url and "/id/login" not in url:
-                        break
-                    await self.page.wait_for_timeout(700)
-                logger.success(
-                    "Store login entry completed the store session | url={}", self.page.url
+                switch_outcome = await session_vault.confirm_switch_account(
+                    self.page, email=settings.EPIC_EMAIL
                 )
-                return True
+                if switch_outcome == "failed":
+                    raise RuntimeError("Epic switch-account prompt could not be confirmed")
+                if switch_outcome == "confirmed":
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        url = self.page.url or ""
+                        if "switch-account" not in url and "/id/login" not in url:
+                            break
+                        await self.page.wait_for_timeout(700)
+                    logger.success(
+                        "Store login entry completed the store session | url={}", self.page.url
+                    )
+                    return True
+                # "form": Epic offered the credential form instead; fall through and log in.
 
             try:
                 await self._wait_for_login_form(point_url)

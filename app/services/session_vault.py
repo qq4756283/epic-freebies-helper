@@ -32,7 +32,6 @@ import json
 import os
 import re
 import time
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -448,13 +447,11 @@ STORE_SILENT_LOGIN_URL = (
 STORE_LOGIN_ENTRY = "https://store.epicgames.com/login"
 
 _SWITCH_ACCOUNT_SELECTORS = (
-    "[data-testid='switch-account-continue']",
+    "[data-testid='modal-content'] [role='button']",
+    "[data-testid='modal-content'] button",
     "button:has-text('Continue')",
     "//button[contains(normalize-space(.), 'Continue')]",
     "//*[@role='button'][contains(normalize-space(.), 'Continue')]",
-    "a:has-text('Continue')",
-    "[data-testid*='switch'] button",
-    "//button[contains(normalize-space(.), 'Sign in')]",
 )
 
 
@@ -518,41 +515,59 @@ async def store_logged_in(page: Any) -> bool:
     return False
 
 
-async def confirm_switch_account(page: Any, timeout_seconds: int = 20) -> bool:
-    """Confirm Epic's "which account?" page so the store login can complete.
+async def confirm_switch_account(page: Any, email: str = "", timeout_seconds: int = 20) -> str:
+    """Answer Epic's "Confirm Your Account" page.
 
-    After an account-level login, store.epicgames.com still asks for a confirmation on
-    www.epicgames.com/id/login/switch-account. Without that click the store never receives
-    its authorization code, and every Get click bounces back to this page.
+    The dumped page (runtime/switch-account.html) contains "Welcome back <name> <email>",
+    a clickable account tile, and exactly one button: "Use another account". There is no
+    Continue button, which is why the first attempts matched nothing.
+
+    Returns ``"confirmed"`` (left the page), ``"form"`` (switched to the credential form,
+    which the caller fills) or ``"failed"``.
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if "switch-account" not in (page.url or ""):
-            return True
-        for selector in _SWITCH_ACCOUNT_SELECTORS:
+            return "confirmed"
+
+        tile_selectors: list[str] = []
+        if email:
+            tile_selectors.append(f"text={email}")
+            tile_selectors.append(f"//*[contains(normalize-space(.), '{email}')]")
+        tile_selectors.extend(_SWITCH_ACCOUNT_SELECTORS)
+
+        for selector in tile_selectors:
             try:
                 candidate = page.locator(selector).first
-                if await candidate.is_visible(timeout=1200):
+                if await candidate.is_visible(timeout=1000):
                     await candidate.click(timeout=3000)
-                    logger.info("switch-account confirmed via {}", selector)
+                    logger.info("switch-account: clicked the known account via {}", selector)
                     await page.wait_for_timeout(1500)
                     if "switch-account" not in (page.url or ""):
-                        return True
+                        return "confirmed"
             except Exception:
                 continue
 
-        # Keyboard fallback: the row may be focusable but not matched by a selector.
-        with suppress(Exception):
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(800)
-            if "switch-account" not in (page.url or ""):
-                return True
+        for selector in (
+            "button:has-text('Use another account')",
+            "text=Use another account",
+            "//button[contains(normalize-space(.), 'another account')]",
+        ):
+            try:
+                candidate = page.locator(selector).first
+                if await candidate.is_visible(timeout=800):
+                    await candidate.click(timeout=3000)
+                    logger.info("switch-account: switched to the credential form")
+                    await page.wait_for_timeout(1500)
+                    return "form"
+            except Exception:
+                continue
 
         await page.wait_for_timeout(600)
 
     await _dump_page_html(page, "switch-account")
     logger.warning("switch-account confirmation failed | url={}", page.url)
-    return False
+    return "failed"
 
 
 async def store_login_handoff(page: Any, timeout_seconds: int = 40) -> bool:
@@ -571,9 +586,13 @@ async def store_login_handoff(page: Any, timeout_seconds: int = 40) -> bool:
     while time.monotonic() < deadline:
         url = page.url or ""
         if "switch-account" in url:
-            if not await confirm_switch_account(page, timeout_seconds=15):
-                return False
-            continue
+            outcome = await confirm_switch_account(
+                page, email=(os.getenv("EPIC_EMAIL") or "").strip(), timeout_seconds=15
+            )
+            if outcome == "confirmed":
+                continue
+            logger.info("Store login needs credentials (%s); the caller owns that step", outcome)
+            return False
         if await store_logged_in(page):
             logger.success("Store login handoff completed | url={}", url)
             return True
