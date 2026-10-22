@@ -411,35 +411,59 @@ async def request_exchange_code() -> str | None:
 
 
 async def _redeem_exchange_code(context: Any, code: str) -> bool:
-    """Spend the exchange code at whichever endpoint still exists."""
+    """Spend the exchange code at whichever endpoint still exists.
+
+    Probing (2026-10-23) showed GET id/api/exchange is gone (404) while POST answers 409,
+    i.e. the route exists but rejects the body - so POST is tried with several payload
+    shapes plus the XSRF header the portal expects.
+    """
+    xsrf = ""
+    try:
+        for cookie in await context.cookies():
+            if cookie.get("name") in {"XSRF-TOKEN", "X-XSRF-TOKEN"}:
+                xsrf = cookie.get("value", "")
+                break
+    except Exception:
+        xsrf = ""
+
+    attempts: list[tuple[str, str, dict[str, Any]]] = []
     for url in WEB_EXCHANGE_ENDPOINTS:
-        for method in ("get", "post"):
-            try:
-                if method == "get":
-                    response = await context.request.get(
-                        url, params={"code": code}, timeout=HTTP_TIMEOUT_SECONDS * 1000
-                    )
-                else:
-                    response = await context.request.post(
-                        url, form={"code": code}, timeout=HTTP_TIMEOUT_SECONDS * 1000
-                    )
-            except Exception as err:
-                logger.info("Session vault: exchange {} {} failed | error={!r}", method, url, err)
-                continue
-            if response.status < 400:
-                logger.success(
-                    "Session vault: exchange code accepted | {} {} | status={}",
-                    method.upper(),
-                    url,
-                    response.status,
+        attempts.append(("get", url, {"params": {"code": code}}))
+        for payload in ({"code": code}, {"exchangeCode": code}):
+            headers = {"Content-Type": "application/json"}
+            if xsrf:
+                headers["x-xsrf-token"] = xsrf
+            attempts.append(("post", url, {"json": payload, "headers": headers}))
+        attempts.append(("post", url, {"form": {"code": code}}))
+
+    for method, url, kwargs in attempts:
+        try:
+            if method == "get":
+                response = await context.request.get(
+                    url, timeout=HTTP_TIMEOUT_SECONDS * 1000, **kwargs
                 )
-                return True
-            logger.info(
-                "Session vault: exchange {} {} rejected | status={}",
+            else:
+                response = await context.request.post(
+                    url, timeout=HTTP_TIMEOUT_SECONDS * 1000, **kwargs
+                )
+        except Exception as err:
+            logger.info("Session vault: exchange {} {} failed | error={!r}", method, url, err)
+            continue
+        if response.status < 400:
+            logger.success(
+                "Session vault: exchange code accepted | {} {} | status={}",
                 method.upper(),
                 url,
                 response.status,
             )
+            return True
+        logger.info(
+            "Session vault: exchange {} {} rejected | status={} | body={}",
+            method.upper(),
+            url,
+            response.status,
+            await _api_text(response, 80),
+        )
     return False
 
 
