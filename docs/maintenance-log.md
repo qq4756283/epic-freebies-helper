@@ -2120,3 +2120,35 @@
      填账密，这是一条确定性路径）。
   2. 若两条都不行，改为"在 store 域完成一次完整登录"（`/login` → 表单 → 验证码），把
      store 会话作为登录副产品，然后在同一会话里领取。
+
+### 2026-10-23 05:00-05:50 第二轮：CSRF/prompt=none 两条路都堵死；修复 CI 回归
+
+- 现象（本轮 4 次运行，39852702609 → 39859475754）：
+  - exchange 换 cookie 的每一种形状都被拒：
+    `POST https://www.epicgames.com/id/api/exchange` → `409 errors.com.epicgames.accountportal.csrf_token_invalid`
+    （GET 为 404，说明路由在、GET 不支持）。带 `x-xsrf-token`、以及**在页面内 `fetch()`** 提交，
+    仍然是同一个 409。
+  - OIDC 静默授权 `id/login?...&client_id=875a3b57...&prompt=none` 仍然落到 switch-account，
+    Epic 没有按 prompt=none 直接回 302 到 store。
+  - 之后回落到"清 cookie → store 表单登录"，4 分钟后 `Timed out waiting for Epic login outcome`。
+- 根因判断：
+  - store 域的会话只能由一次**被 Epic 接受的登录**产生；而我们能拿到的会话凭证接口
+    （redirect/exchange）都要求同一个"已被 cookie 认定的会话"，形成闭环。
+  - 登录本身在机房 IP 上仍是被动风控：验证码能解（多次 `Challenge success`），但 Epic 经常
+    不给 login outcome 或判 captcha 无效。
+- 改动文件：
+  - `app/extensions/llm_adapter.py`：修正 **CI 回归**——上一轮新增的散文坐标提取器与原
+    `_extract_points_from_text`（处理裸 CSV / 元组 / 数组）同名，把原实现遮蔽了，导致
+    `tests/test_glm_adapter.py::test_area_select_bare_csv_point_is_converted` 连挂 8 次
+    （1 failed, 60 passed）。散文提取器改名 `_extract_points_from_narration`，原函数恢复；
+    本地复现 `{"answer":"1139, 729"}` → `{'challenge_prompt':'','points':[{'x':1139,'y':729}]}`。
+  - `app/services/session_vault.py`：`PORTAL_SILENT_HANDOFF`（prompt=none 静默授权）作为
+    store handoff 的首选尝试，失败再走 store 登录入口。
+  - `scripts/gate.py`：闸门从"每自然日一次"改为"距上次登录尝试 ≥ 3.5 小时"，让 4 个 cron
+    槽位里最多 4 次/天，而不是只 1 次。
+- 处理结果：
+  - CI 恢复绿色（`tests: success`，commit 54921fa）。
+  - 登录仍未成功一次：scoreboard 记录连续 `auth_failed_captcha`（累计 30 条）。
+- 结论：
+  - 代码侧可修的部分（CTA 定位、遮罩、坐标解析、会话复用、调度冗余、CI）已经修完；
+    剩下的瓶颈是"机房 IP 上 Epic 不接受登录"，需要住宅/家宽出口（`BROWSER_PROXY`）才能稳定通过。
