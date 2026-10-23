@@ -892,13 +892,22 @@ class EpicAuthorization:
                     self.page, email=settings.EPIC_EMAIL, timeout_seconds=12
                 )
                 if switch_outcome == "failed":
-                    # The tile on "Confirm Your Account" ignores both synthetic and trusted
-                    # clicks (2026-10-23), so stop fighting it: drop the account session and
-                    # log in from scratch through the store entry, which yields the store
-                    # session and a normal credential form.
+                    # switch-account appearing is itself proof that the account session is
+                    # alive - and that session is the only thing that can mint a store
+                    # authorization code. Try the code -> store handoff BEFORE touching
+                    # cookies; clearing them here threw away the usable session.
                     logger.warning(
-                        "switch-account could not be confirmed; clearing the account session "
-                        "and logging in from scratch through the store entry"
+                        "switch-account could not be confirmed; trying the authorization-code "
+                        "handoff to the store before giving up on this session"
+                    )
+                    if await session_vault.establish_store_session(self.page.context, self.page):
+                        logger.success(
+                            "Store session established from the existing account session"
+                        )
+                        return True
+                    logger.warning(
+                        "Code handoff did not work; clearing the account session and logging in "
+                        "from scratch through the store entry"
                     )
                     with suppress(Exception):
                         await self.page.context.clear_cookies()

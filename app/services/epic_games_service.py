@@ -1068,7 +1068,12 @@ class EpicGames:
                 "Claim click bounced into the store login flow; completing SSO and retrying - {}",
                 url,
             )
-            if await session_vault.store_silent_login(page):
+            # An account session still exists at this point (that is why the store bounced us),
+            # so try the authorization-code handoff first - it needs no login form.
+            recovered = await session_vault.establish_store_session(page.context, page)
+            if not recovered:
+                recovered = await session_vault.store_silent_login(page)
+            if recovered:
                 with suppress(Exception):
                     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     await page.wait_for_timeout(1500)
