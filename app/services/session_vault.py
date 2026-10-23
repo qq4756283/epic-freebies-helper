@@ -693,31 +693,47 @@ async def _redeem_code_at_store(page: Any, code: str) -> bool:
 async def establish_store_session(context: Any, page: Any) -> bool:
     """Create the store session from a live account session.
 
-    With account cookies present, id/api/redirect issues an authorization code for the store
-    client; handing that code to the store's own /auth/login entry creates the store session
-    without any login form or captcha. This is the replacement for id/api/exchange, which the
-    2026 portal only answers with 404/409.
+    With account cookies present, id/api/redirect issues an authorization code; handing that
+    code to the store's own /auth/login entry creates the store session without any login
+    form or captcha. The 2026 endpoint only answers 404/409 for id/api/exchange, so this is
+    the replacement.
+
+    The store client answers 200 without a code (logged), while the web client has been seen
+    issuing one from the same cookie session - so try all three clients.
     """
-    try:
-        response = await context.request.get(
-            WEB_REDIRECT_URL,
-            params={"clientId": STORE_CLIENT_ID, "responseType": "code"},
-            timeout=HTTP_TIMEOUT_SECONDS * 1000,
-        )
-    except Exception as err:
-        logger.warning("Session vault: store code request failed | error={!r}", err)
-        return False
+    for client_id in (STORE_CLIENT_ID, WEB_CLIENT_ID, LAUNCHER_CLIENT_ID):
+        try:
+            response = await context.request.get(
+                WEB_REDIRECT_URL,
+                params={"clientId": client_id, "responseType": "code"},
+                timeout=HTTP_TIMEOUT_SECONDS * 1000,
+            )
+        except Exception as err:
+            logger.warning("Session vault: store code request failed | error={!r}", err)
+            continue
 
-    code = _extract_code(await _api_json(response)) if response.status == 200 else None
-    if not code:
-        logger.info(
-            "Session vault: no authorization code for the store client | status={}",
-            response.status,
-        )
-        return False
+        if response.status != 200:
+            logger.info(
+                "Session vault: store code request rejected | client={} | status={}",
+                client_id,
+                response.status,
+            )
+            continue
 
-    logger.info("Session vault: store authorization code acquired")
-    return await _redeem_code_at_store(page, code)
+        payload = await _api_json(response)
+        code = _extract_code(payload)
+        if not code:
+            logger.info(
+                "Session vault: no authorization code | client={} | body={}",
+                client_id,
+                await _api_text(response, 160),
+            )
+            continue
+
+        logger.info("Session vault: authorization code acquired | client={}", client_id)
+        if await _redeem_code_at_store(page, code):
+            return True
+    return False
 
 
 async def store_logged_in(page: Any) -> bool:
