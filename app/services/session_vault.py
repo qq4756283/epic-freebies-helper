@@ -728,11 +728,28 @@ async def establish_store_session(context: Any, page: Any) -> bool:
         payload = await _api_json(response)
         code = _extract_code(payload)
         if not code:
+            target = ""
+            if isinstance(payload, dict):
+                target = str(payload.get("redirectUrl") or payload.get("location") or "")
             logger.info(
-                "Session vault: no authorization code | client={} | body={}",
+                "Session vault: no code in the answer | client={} | redirectUrl={}",
                 client_id,
-                await _api_text(response, 320),
+                target[:400],
             )
+            # Epic hands back a redirectUrl even without a parseable code param; visiting it
+            # in the browser lets the account service finish the authorize leg itself.
+            if target.startswith("http"):
+                try:
+                    await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(1800)
+                except Exception as err:
+                    logger.info("Session vault: redirectUrl visit failed | error={!r}", err)
+                    continue
+                if await store_logged_in(page):
+                    logger.success(
+                        "Session vault: store session established by visiting the redirectUrl"
+                    )
+                    return True
             continue
 
         logger.info("Session vault: authorization code acquired | client={}", client_id)
