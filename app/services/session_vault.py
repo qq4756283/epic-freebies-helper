@@ -35,6 +35,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from loguru import logger
@@ -303,24 +304,28 @@ async def _api_text(response: Any, limit: int = 200) -> str:
 
 
 def _extract_code(payload: dict[str, Any] | None) -> str | None:
-    """Pull an authorization code out of either response shape.
+    """Pull an authorization code out of any of the shapes Epic returns.
 
-    ``id/api/redirect`` answers ``{"authorizationCode": ...}`` only in some contexts; the
-    cookie-session variant answers ``{"redirectUrl": ".../callback?code=..."}``, which is
-    why a strict ``authorizationCode`` lookup returned nothing and seeding silently died.
+    Observed 2026-10-24: id/api/redirect answers 200 with
+    {"warning": "Do not share this code ...", "redirectUrl": "..."} - the code lives inside
+    redirectUrl, sometimes percent-encoded, and there is no authorizationCode key at all.
     """
     if not payload:
         return None
-    direct = payload.get("authorizationCode")
-    if isinstance(direct, str) and direct:
-        return direct
+
+    for key in ("authorizationCode", "code", "exchangeCode"):
+        direct = payload.get(key)
+        if isinstance(direct, str) and direct:
+            return direct
+
     for key in ("redirectUrl", "redirect_url", "url", "location"):
         value = payload.get(key)
-        if not isinstance(value, str):
+        if not isinstance(value, str) or not value:
             continue
-        match = re.search(r"[?&]code=([^&#]+)", value)
-        if match:
-            return match.group(1)
+        for candidate in (value, unquote(value)):
+            match = re.search(r"[?&]code=([^&#]+)", candidate)
+            if match:
+                return unquote(match.group(1))
     return None
 
 
@@ -726,7 +731,7 @@ async def establish_store_session(context: Any, page: Any) -> bool:
             logger.info(
                 "Session vault: no authorization code | client={} | body={}",
                 client_id,
-                await _api_text(response, 160),
+                await _api_text(response, 320),
             )
             continue
 
