@@ -732,9 +732,9 @@ async def establish_store_session(context: Any, page: Any) -> bool:
             if isinstance(payload, dict):
                 target = str(payload.get("redirectUrl") or payload.get("location") or "")
             logger.info(
-                "Session vault: no code in the answer | client={} | redirectUrl={}",
+                "Session vault: no code in the answer | client={} | payload={}",
                 client_id,
-                target[:400],
+                json.dumps(payload, ensure_ascii=False)[:600] if payload else "<empty>",
             )
             # Epic hands back a redirectUrl even without a parseable code param; visiting it
             # in the browser lets the account service finish the authorize leg itself.
