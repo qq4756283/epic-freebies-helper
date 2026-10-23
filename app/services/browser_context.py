@@ -17,6 +17,71 @@ from requests import HTTPError, RequestException
 from settings import RECORD_DIR, settings
 
 _VIEWPORT = ViewportSize(width=1920, height=1080)
+
+# Upstream evidence (vogler/free-games-claimer, the only actively maintained claimer):
+# "Without stealth plugin, the website shows an hcaptcha on login with username/password and
+# in the last step of claiming a game... After <6h (TBD) it resets to no captcha again.
+# Getting a new IP also resets."
+# So the winning strategy is to make the challenge never appear, not to solve it. These are
+# the evasions that project enables, plus a desktop Firefox UA - we run on Linux runners, and
+# a Linux UA in a datacenter is exactly what Epic distrusts.
+_STEALTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0"
+
+_STEALTH_INIT_SCRIPT = r"""
+(() => {
+  const define = (obj, prop, getter) => {
+    try { Object.defineProperty(obj, prop, { get: getter, configurable: true }); } catch (e) {}
+  };
+  define(Navigator.prototype, 'webdriver', () => undefined);
+  define(Navigator.prototype, 'language', () => 'en-US');
+  define(Navigator.prototype, 'languages', () => ['en-US', 'en']);
+  define(Navigator.prototype, 'hardwareConcurrency', () => 8);
+  define(Navigator.prototype, 'deviceMemory', () => 8);
+  try {
+    define(Navigator.prototype, 'plugins', () => {
+      const names = [
+        ['PDF Viewer', 'internal-pdf-viewer'],
+        ['Chrome PDF Viewer', 'internal-pdf-viewer'],
+        ['Chromium PDF Viewer', 'internal-pdf-viewer'],
+      ];
+      const list = names.map(([name, filename]) => {
+        const plugin = Object.create(Plugin.prototype);
+        Object.defineProperties(plugin, {
+          name: { value: name },
+          filename: { value: filename },
+          description: { value: 'Portable Document Format' },
+          length: { value: 1 },
+        });
+        return plugin;
+      });
+      return Object.setPrototypeOf(list, PluginArray.prototype);
+    });
+  } catch (e) {}
+  try {
+    const original = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (parameter) {
+      if (parameter === 37445) return 'Intel Inc.';
+      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+      return original.call(this, parameter);
+    };
+  } catch (e) {}
+  try {
+    if (!window.outerWidth) define(window, 'outerWidth', () => window.innerWidth);
+    if (!window.outerHeight) define(window, 'outerHeight', () => window.innerHeight + 80);
+  } catch (e) {}
+})();
+"""
+
+
+async def _install_stealth(context: BrowserContext) -> None:
+    """Apply the launch-time evasions hCaptcha checks for (see _STEALTH_INIT_SCRIPT)."""
+    try:
+        await context.add_init_script(_STEALTH_INIT_SCRIPT)
+        logger.info("Stealth init script installed | evasions=webdriver/languages/plugins/webgl")
+    except Exception as err:
+        logger.warning("Could not install stealth init script | error={!r}", err)
+
+
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PROXY_SCHEMES = {"http", "https", "socks4", "socks5"}
@@ -180,6 +245,8 @@ def _camoufox_launch_options(headless: bool | str, proxy: dict[str, str] | None)
         "record_video_size": _VIEWPORT,
         "firefox_user_prefs": firefox_user_prefs,
         "humanize": 0.2,
+        "os": ["windows"],
+        "locale": ["en-US"],
         "headless": headless,
     }
     if proxy is not None:
@@ -217,6 +284,7 @@ def _playwright_launch_options(
         "user_data_dir": str(settings.user_data_dir_for("playwright")),
         "headless": False if headless == "virtual" else bool(headless),
         "viewport": _VIEWPORT,
+        "user_agent": _STEALTH_UA,
         "record_video_dir": str(RECORD_DIR),
         "record_video_size": _VIEWPORT,
     }
@@ -292,6 +360,7 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
             try:
                 camoufox = AsyncCamoufox(**camoufox_options)
                 browser = await camoufox.__aenter__()
+                await _install_stealth(browser)
             finally:
                 camoufox_utils.validate_config = _orig_validate
         except Exception as err:
@@ -333,9 +402,8 @@ async def open_browser_context(headless: bool | str) -> AsyncIterator[BrowserCon
             playwright_options = _playwright_launch_options(headless, proxy, display=display)
             ensure_healthy_profile(Path(str(playwright_options["user_data_dir"])))
             _mark_active_profile_dir(Path(str(playwright_options["user_data_dir"])))
-            browser = await playwright.firefox.launch_persistent_context(
-                **playwright_options
-            )
+            browser = await playwright.firefox.launch_persistent_context(**playwright_options)
+            await _install_stealth(browser)
             logger.warning(
                 "Browser backend active | backend=playwright-firefox | "
                 "headless_mode={} | proxy_enabled={}",
