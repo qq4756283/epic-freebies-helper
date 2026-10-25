@@ -169,6 +169,18 @@ def _is_strict_json_model(model: str | None) -> bool:
     )
 
 
+def _is_glm_vision_model(model: str | None) -> bool:
+    """Zhipu GLM vision models narrate when the schema is not forced.
+
+    2026-10-24 runs: 10 challenges produced 25 parse failures, with answers like "Based on
+    the image, I need to identify which 3 arrows are pointing toward the central star..."
+    - reasoning prose instead of the requested JSON, because the strict-JSON gate only
+    matched muse-spark/longcat/mimo models.
+    """
+    name = (model or "").strip().lower()
+    return name.startswith("glm-") and "v" in name
+
+
 GLM_STRICT_JSON_INSTRUCTION = (
     "Respond with ONLY a single JSON object. No explanations, no markdown, "
     "no code fences, no tool calls. If you cannot solve it, still respond "
@@ -1209,7 +1221,7 @@ class _GLMAsyncModels:
         system_messages: list[str] = []
         has_image = False
 
-        if _is_strict_json_model(model):
+        if _is_strict_json_model(model) or _is_glm_vision_model(model):
             system_messages.append(GLM_STRICT_JSON_INSTRUCTION)
 
         system_instruction = getattr(config, "system_instruction", None)
@@ -1253,7 +1265,11 @@ class _GLMAsyncModels:
         }
 
         temperature = getattr(config, "temperature", None)
-        if _is_strict_json_model(model):
+        if _is_glm_vision_model(model):
+            # Deterministic answers. No tool_choice / parallel_tool_calls here: those are not
+            # part of the Zhipu OpenAI-compatible surface and can be rejected outright.
+            payload["temperature"] = 0
+        elif _is_strict_json_model(model):
             payload["temperature"] = 0
             payload["tool_choice"] = "none"
             payload["parallel_tool_calls"] = False
