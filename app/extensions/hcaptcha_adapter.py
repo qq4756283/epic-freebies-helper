@@ -246,6 +246,51 @@ async def _wait_for_challenge_image(frame_challenge: Any, timeout_ms: int = 8000
     return False
 
 
+def _helper_points_to_view_points(
+    points: list[Any], helper_image_path: Path, view_image_path: Path
+) -> list[Any]:
+    """Convert model coordinates (the 1000x1000 grid canvas) into challenge-view pixels.
+
+    _capture_spatial_mapping saves the challenge view (e.g. 500x471) and a grid overlay
+    (always 1000x1000, the matplotlib canvas). The model answers in the overlay's space, but
+    every mapping helper in this module works in challenge-view space, so without this
+    conversion each answer was scaled by roughly view/1000 - i.e. all clicks landed ~2x too
+    far out, which is why multi-select challenges never passed.
+    """
+    if not points:
+        return points
+
+    helper = cv2.imread(str(helper_image_path))
+    view = cv2.imread(str(view_image_path))
+    if helper is None or view is None:
+        return points
+
+    gray = cv2.cvtColor(helper, cv2.COLOR_BGR2GRAY)
+    mask = (gray < 245).astype(np.uint8)
+    columns = np.where(mask.any(axis=0))[0]
+    rows = np.where(mask.any(axis=1))[0]
+    if columns.size == 0 or rows.size == 0:
+        return points
+
+    x_min, x_max = int(columns.min()), int(columns.max())
+    y_min, y_max = int(rows.min()), int(rows.max())
+    span_x = max(1, x_max - x_min)
+    span_y = max(1, y_max - y_min)
+    view_height, view_width = view.shape[:2]
+
+    converted: list[Any] = []
+    for point in points:
+        x = (float(getattr(point, "x", 0.0)) - x_min) * view_width / span_x
+        y = (float(getattr(point, "y", 0.0)) - y_min) * view_height / span_y
+        converted.append(
+            PointCoordinate(
+                x=int(round(min(max(x, 0), view_width - 1))),
+                y=int(round(min(max(y, 0), view_height - 1))),
+            )
+        )
+    return converted
+
+
 def _is_count_selection_question(question: str) -> bool:
     normalized = question.lower()
     return "animal" in normalized and "count" in normalized
@@ -983,8 +1028,9 @@ def apply_hcaptcha_drag_patch() -> None:
                 )
                 logger.debug(f'[{cid+1}/{crumb_count}]ToolInvokeMessage: {response.log_message}')
 
+                model_points = _helper_points_to_view_points(response.points, projection, raw)
                 safe_points, rejected_reasons = _filter_safe_points(
-                    response.points,
+                    model_points,
                     challenge_bbox=challenge_bbox,
                     clickable_bounds=clickable_bounds,
                 )
