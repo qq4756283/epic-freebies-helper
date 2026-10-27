@@ -1022,5 +1022,25 @@
       "source": "refresh",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-27T14:53:31Z",
+    "run_id": "40524537003",
+    "event": "schedule",
+    "outcome": "auth_failed_captcha",
+    "stage": "auth",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "failed",
+        "ms": 251872.6,
+        "max_attempts": 1
+      }
+    ],
+    "session": {
+      "source": "refresh",
+      "has_refresh_token": true
+    }
   }
 ]
