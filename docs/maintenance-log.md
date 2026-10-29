@@ -2152,3 +2152,40 @@
 - 结论：
   - 代码侧可修的部分（CTA 定位、遮罩、坐标解析、会话复用、调度冗余、CI）已经修完；
     剩下的瓶颈是"机房 IP 上 Epic 不接受登录"，需要住宅/家宽出口（`BROWSER_PROXY`）才能稳定通过。
+
+### 2026-10-29 周四（刷新日）：本周周免未领取；链路推进到 checkout，卡在语义验证码
+
+结论：`Sker Ritual`、`Home - A Unique Horror Adventure` **未入库**。scoreboard 至今没有任何
+`claimed_ok`。
+
+当天共 7 次尝试（1 次定时 + 6 次强制），分两类失败：
+
+| 时间 | 挑战数 | 解出 | 结果 |
+|---|---|---|---|
+| 15:53 | 11 | 2 | **Login success**，store 会话建立，走到 checkout，9 次 `signal=failure` |
+| 18:00 | 3 | 2 | 解出但 Epic 判 `captcha_invalid` |
+| 18:04 | 2 | 1 | 登录超时 |
+| 20:45 | **14** | 1 | 登录超时（挑战数暴涨＝怀疑度上升） |
+| 22:15 | 5 | 0 | 登录超时 |
+
+**结构性突破**：15:53 那轮第一次走到 `auth:ok, claim:failed`——登录、store 会话、CTA 定位、
+instant checkout 全部走通，卡点从"登录"挪到了"Epic 的结算人机校验"。
+
+**新增的三个修复**：
+1. `e200079` checkout 安全校验成功后不再重复求解。证据：attempt 1 `signal=success`，之后
+   attempt 2/3/4 全是 `AttributeError: 'NoneType' object has no attribute 'locator'`（去解一个
+   已经不存在的 challenge frame），最后被判"未确认"。
+2. `b21653a` 钉 `ubuntu-24.04` + Firefox 安装容错。证据：`Playwright does not support firefox
+   on ubuntu26.04-x64`，1m48s 废掉整轮。
+3. `4574bc4` 429 时自动换模型。证据：`glm-4.6v-flash` 连续 11 次 `code=1305`，2 个挑战全灭。
+
+**教训（重要）**：今天连续尝试把挑战数从 3 推到 14，解出率从 2/3 掉到 1/14。这印证了上游
+vogler 的注释——`After <6h it resets to no captcha; getting a new IP also resets`。**密集重试
+是负收益**，冷却应当更长而不是更短。
+
+**下周策略（按优先级）**：
+1. **语义题是唯一确定短板**：checkout 与登录后期的题型（"把字母拖到合适位置"、"选出指向图形
+   的 3 支箭"）免费模型只能猜，日志里模型自述 `I'll have to make my best inference`。
+   解法：接一个更强的视觉模型（付费 GLM-4.6V / Gemini 免费额度）专用于这两类题型。
+2. **冷却从 6h 提到 24h**，并在同一天内最多 2 次尝试，避免自我加压。
+3. 若仍不稳，则需要住宅/家宽出口（`BROWSER_PROXY`）。
