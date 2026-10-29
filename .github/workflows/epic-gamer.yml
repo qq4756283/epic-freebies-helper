@@ -24,7 +24,7 @@ env:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: github.repository != 'Ronchy2000/epic-freebies-helper'
     outputs:
@@ -43,7 +43,7 @@ jobs:
   epic-gamer:
     needs: gate
     if: needs.gate.outputs.run == 'yes'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A single account run can take 15-20 minutes. Multi-account runs are
     # sequential, so scale the timeout with the number of accounts by setting
     # a repository variable JOB_TIMEOUT_MINUTES (Settings -> Secrets and
@@ -120,7 +120,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: uv run camoufox fetch
 
+      # Playwright refuses to install firefox on newer runner images:
+      # Playwright does not support firefox on ubuntu26.04-x64 (2026-10-29).
+      # Camoufox is the primary backend, so a failed fallback install must not
+      # kill the run.
       - name: Install Playwright Firefox fallback
+        continue-on-error: true
         run: uv run playwright install firefox
 
       - name: Probe LLM gateway reachability
