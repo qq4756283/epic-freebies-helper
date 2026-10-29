@@ -1372,6 +1372,21 @@ class _GLMAsyncModels:
             "GLM request failed | status={} | code={} | body={}", response.status_code, code, body
         )
 
+    def _fallback_model(self, model: str, endpoint: str) -> str | None:
+        """Pick another free model when the preferred one is cooling down.
+
+        Zhipu answers an overloaded model with 429 {"code":"1305"} per *model*, so switching
+        model is a real way out: on 2026-10-29 glm-4.6v-flash was rate-limited while
+        glm-4.1v-thinking-flash still answered.
+        """
+        raw = os.getenv("GLM_FALLBACK_MODELS") or "glm-4.1v-thinking-flash,glm-4v-flash"
+        for candidate in (item.strip() for item in raw.split(",")):
+            if not candidate or candidate == model:
+                continue
+            if is_model_cooling(candidate, endpoint) <= 0:
+                return candidate
+        return None
+
     async def generate_content(self, model: str, contents: Any, **kwargs) -> _PatchedResponse:
         config = kwargs.pop("config", None)
         if config is None:
@@ -1381,8 +1396,20 @@ class _GLMAsyncModels:
         if not endpoint.endswith("/chat/completions"):
             endpoint = f"{endpoint}/chat/completions"
 
+        allow_fallback = not kwargs.pop("_no_fallback", False)
         remaining = is_model_cooling(model, endpoint)
         if remaining > 0:
+            fallback = self._fallback_model(model, endpoint) if allow_fallback else None
+            if fallback:
+                logger.warning(
+                    "GLM model {} cooling down ({:.0f}s left); falling back to {}",
+                    model,
+                    remaining,
+                    fallback,
+                )
+                return await self.generate_content(
+                    fallback, contents, config=config, _no_fallback=True, **kwargs
+                )
             raise GlmRateLimitedError(
                 f"GLM model '{model}' is cooling down for another {remaining:.0f}s "
                 "after a rate-limit response; skipping request"
@@ -1401,6 +1428,17 @@ class _GLMAsyncModels:
             response = await client.post(endpoint, headers=headers, json=payload)
             if response.is_error:
                 self._log_glm_error(response, model, endpoint)
+                if response.status_code == 429 and allow_fallback:
+                    fallback = self._fallback_model(model, endpoint)
+                    if fallback:
+                        logger.warning(
+                            "GLM model {} rate-limited; retrying the request with {}",
+                            model,
+                            fallback,
+                        )
+                        return await self.generate_content(
+                            fallback, contents, config=config, _no_fallback=True, **kwargs
+                        )
                 response.raise_for_status()
             data = response.json()
 
