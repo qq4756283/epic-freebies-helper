@@ -1534,6 +1534,34 @@ class EpicGames:
                         remaining_seconds,
                     ),
                 )
+                if challenge_signal is ChallengeSignal.SUCCESS:
+                    # The check IS solved at this point. Previously the loop kept going,
+                    # re-read a lingering overlay and tried to solve a challenge frame that no
+                    # longer existed - four times in run 40714573194:
+                    #   attempt 1: signal=success
+                    #   attempt 2..4: AttributeError 'NoneType' object has no attribute 'locator'
+                    # and the claim was then reported as unconfirmed. Settle briefly, then trust
+                    # the signal so the checkout can finalize.
+                    logger.success(
+                        "Checkout security check solved | attempt={} | waiting for finalize | url={}",
+                        attempt,
+                        url,
+                    )
+                    for _ in range(6):
+                        await page.wait_for_timeout(2000)
+                        if await self._is_claimed_state(page, url):
+                            logger.success("Checkout finalized into claimed state | url={}", url)
+                            return True
+                        outcome = await self._observe_checkout_outcome(page, url, timeout_ms=4000)
+                        if outcome in {"claimed", "checkout", "pending"}:
+                            logger.success(
+                                "Checkout security check cleared into {} | url={}", outcome, url
+                            )
+                            return True
+                        if not await self._is_checkout_security_check_visible(page):
+                            return True
+                    return True
+
                 if challenge_signal is not ChallengeSignal.SUCCESS:
                     logger.warning(
                         "Checkout hCaptcha did not succeed | attempt={} | signal={} | url={}",
