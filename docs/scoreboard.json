@@ -1243,5 +1243,25 @@
       "source": "refresh",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-29T14:22:13Z",
+    "run_id": "40889671783",
+    "event": "workflow_dispatch",
+    "outcome": "auth_failed_captcha",
+    "stage": "auth",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "failed",
+        "ms": 253140.3,
+        "max_attempts": 1
+      }
+    ],
+    "session": {
+      "source": "refresh",
+      "has_refresh_token": true
+    }
   }
 ]
