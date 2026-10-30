@@ -2236,3 +2236,31 @@ vogler 的注释——`After <6h it resets to no captcha; getting a new IP also 
     无 token / cookie 注入失败时返回 False。
 - 结果：`pytest` 61 → 67 全绿；`ruff check` 通过；`black -l 100` 通过。登录阶段是否需要
   hCaptcha 由下一次真实运行验证（预期：EPIC_EG1 铸造成功 → 不再渲染登录页）。
+
+### 2026-10-30 22:22 首次真实验证：bearer 播种成功，但被"账号门户会话"闸门打回密码登录
+
+- 症状（run 41070286579，force=1，6m19s，outcome=`auth_failed_captcha`）：
+  - `14:17:36 SUCCESS services.session_vault:seed_bearer_session:621 - Session vault:
+    EPIC_EG1 minted from bearer cookie`，紧接着 `invoke:1052 ... seeded=True`
+    ——**播种链路首次真正生效，登录页本来不必出现**。
+  - 但 `14:17:39` 起 `_login()` 仍被调用（`epic_authorization_service._login:859`），随后
+    `confirm_switch_account` 连试 3 轮失败、`establish_store_session` 对三个 client 全部
+    返回 `authorizationCode: null`、`localhost/launcher/authorized` 连接被拒，最后
+    `_submit_login_or_accept_challenge` → 6 次"Login captcha is visible" → 4 次
+    `signal=failure` → `auth_failed_captcha`。
+- 根因判断：`invoke()` 在播种成功后仍然用**账号门户会话**（`_get_login_status` 的 nav 标记、
+  `_account_session_ok()` 的账号 API、`id/api/redirect` 的授权码）判断"是否已登录"。而 bearer
+  播种给的是**店面会话**（`EPIC_EG1`，claabs 全流程只用这一个），两者是不同的 cookie 集合：
+  账号门户会话只有登录页能铸。于是播种成功 → 闸门判否 → 回退密码登录 → 登录页 hCaptcha。
+  这正是"播种白做了"的最后一环，也是 10-29 那轮"登录成功后才走到 checkout"的镜像。
+- 改动文件：
+  - `app/services/session_vault.py`：新增 `store_session_present(context)`（检测 `EPIC_EG1`，
+    异常返回 False）；`seed_bearer_session` 的轮询改为复用它。
+  - `app/services/epic_authorization_service.py`：`invoke()` 在播种成功后，若
+    `store_session_present()` 为真，直接判定登录完成并返回（跳过 nav 标记/账号 API/密码表单）；
+    不再尝试 `ensure_state()`（店面会话铸不出 refresh token，而现有 refresh token 本就会自动
+    轮换，调用只会白等 30 秒并刷噪声日志）。
+  - `tests/test_session_vault_seeding.py`：新增 2 个用例（EG1 命中；异域 cookie 与异常上下文
+    均返回 False）。
+- 结果：`pytest` 69 全绿、`ruff`/`black` 通过；等待下一次真实运行验证"登录阶段零验证码"是否
+  成立，以及店面会话能否把流程推到 checkout。

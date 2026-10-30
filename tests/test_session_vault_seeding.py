@@ -87,3 +87,27 @@ def test_seed_bearer_session_returns_false_when_cookie_injection_fails(monkeypat
     monkeypatch.setattr(vault, "access_token", _token)
     monkeypatch.setattr(vault, "read_state", lambda: {"expires_at": 1234567890})
     assert asyncio.run(vault.seed_bearer_session(_BrokenContext())) is False
+
+
+def test_store_session_present_detects_eg1_cookie():
+    class _Context:
+        async def cookies(self):
+            return [
+                {"name": "EPIC_BEARER_TOKEN", "domain": ".epicgames.com"},
+                {"name": "EPIC_EG1", "domain": ".store.epicgames.com"},
+            ]
+
+    assert asyncio.run(vault.store_session_present(_Context())) is True
+
+
+def test_store_session_present_rejects_foreign_domains_and_broken_contexts():
+    class _ForeignDomain:
+        async def cookies(self):
+            return [{"name": "EPIC_EG1", "domain": ".example.com"}]
+
+    class _Broken:
+        async def cookies(self):
+            raise RuntimeError("context closed")
+
+    assert asyncio.run(vault.store_session_present(_ForeignDomain())) is False
+    assert asyncio.run(vault.store_session_present(_Broken())) is False

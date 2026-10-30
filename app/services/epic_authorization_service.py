@@ -1054,6 +1054,20 @@ class EpicAuthorization:
                 session_vault.describe(),
                 seeded,
             )
+            # A bearer-seeded session is a *store* session: EPIC_EG1 is what the storefront
+            # and its checkout use, and it is all claabs/epicgames-freegames-node ever needs.
+            # The account-portal session (which the nav marker, order history and the
+            # redirect-code handoff read) is a different cookie set that only the login page
+            # mints. Waiting for it here is what turned run 41070286579's successful seeding
+            # into a password login and a login captcha, so accept the store session and let
+            # the claim flow run. The refresh token keeps rotating on its own; there is
+            # nothing to mint here.
+            if await session_vault.store_session_present(self.page.context):
+                logger.success(
+                    "Store session established from the seeded token; skipping the login page"
+                )
+                self._mark_profile_healthy()
+                return True
 
         max_attempts = settings.AUTH_MAX_ATTEMPTS
         for attempt in range(1, max_attempts + 1):

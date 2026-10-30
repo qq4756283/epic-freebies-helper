@@ -569,6 +569,24 @@ def _bearer_cookies(access_token: str, expires_at: int) -> list[dict[str, Any]]:
     ]
 
 
+async def store_session_present(context: Any) -> bool:
+    """Whether the context already owns a store web session (``EPIC_EG1``).
+
+    ``EPIC_EG1`` is the cookie store.epicgames.com itself uses, so it is what the storefront
+    and its checkout need. The account-portal session (www.epicgames.com/id) is a separate,
+    stricter cookie set that only the login page mints - demanding it here would throw away a
+    working store session and pay for a login captcha we do not need.
+    """
+    try:
+        cookies = await context.cookies()
+    except Exception:
+        return False
+    return any(
+        cookie.get("name") == EG1_COOKIE_NAME and "epicgames.com" in (cookie.get("domain") or "")
+        for cookie in cookies
+    )
+
+
 async def seed_bearer_session(context: Any, page: Any = None) -> bool:
     """Seed the browser session from the stored access token, without touching the login page.
 
@@ -610,19 +628,9 @@ async def seed_bearer_session(context: Any, page: Any = None) -> bool:
 
     deadline = time.monotonic() + EG1_POLL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        try:
-            cookies = await context.cookies()
-        except Exception:
-            cookies = []
-        for cookie in cookies:
-            if cookie.get("name") == EG1_COOKIE_NAME and "epicgames.com" in (
-                cookie.get("domain") or ""
-            ):
-                logger.success(
-                    "Session vault: EPIC_EG1 minted from bearer cookie | domain={}",
-                    cookie.get("domain"),
-                )
-                return True
+        if await store_session_present(context):
+            logger.success("Session vault: EPIC_EG1 minted from bearer cookie")
+            return True
         await asyncio.sleep(EG1_POLL_INTERVAL_SECONDS)
 
     logger.warning(
