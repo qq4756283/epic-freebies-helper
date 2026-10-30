@@ -27,6 +27,7 @@ Secrets are never logged. Only lengths, prefixes and expiry timestamps are emitt
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -87,6 +88,15 @@ STATE_VERSION = 1
 # Refresh a little before the server-side expiry so a token never dies mid-run.
 REFRESH_SKEW_SECONDS = 300
 HTTP_TIMEOUT_SECONDS = 25.0
+# Bearer-cookie seeding (ported from claabs/epicgames-freegames-node): the store front-end
+# trades an ``EPIC_BEARER_TOKEN`` cookie for its own ``EPIC_EG1`` web-session cookie. This is
+# the only seeding path that does not depend on the retired ``id/api/exchange`` route.
+BEARER_COOKIE_NAME = "EPIC_BEARER_TOKEN"
+BEARER_COOKIE_DOMAINS = (".epicgames.com", ".twinmotion.com", ".fortnite.com", ".unrealengine.com")
+STORE_CART_URL = "https://store.epicgames.com/en-US/cart"
+EG1_COOKIE_NAME = "EPIC_EG1"
+EG1_POLL_INTERVAL_SECONDS = 0.7
+EG1_POLL_TIMEOUT_SECONDS = float(os.getenv("EPIC_EG1_POLL_TIMEOUT_SECONDS", "60") or "60")
 
 
 def enabled() -> bool:
@@ -425,9 +435,24 @@ async def _redeem_via_page(page: Any, code: str) -> bool:
     try:
         result = await page.evaluate(
             """async ({ code }) => {
+                const readCookie = (name) => {
+                    for (const part of (document.cookie || "").split(";")) {
+                        const item = part.trim();
+                        if (item.startsWith(name + "=")) {
+                            return decodeURIComponent(item.slice(name.length + 1));
+                        }
+                    }
+                    return "";
+                };
+                const xsrf = readCookie("XSRF-TOKEN") || readCookie("X-XSRF-TOKEN");
+                const headers = { "Content-Type": "application/json" };
+                if (xsrf) {
+                    headers["x-xsrf-token"] = xsrf;
+                    headers["x-csrf-token"] = xsrf;
+                }
                 const response = await fetch("/id/api/exchange", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers,
                     credentials: "include",
                     body: JSON.stringify({ code }),
                 });
@@ -452,6 +477,29 @@ async def _redeem_via_page(page: Any, code: str) -> bool:
     return False
 
 
+def _build_exchange_attempts(code: str, xsrf: str = "") -> list[tuple[str, str, dict[str, Any]]]:
+    """Build the (method, url, kwargs) matrix used to spend an exchange code.
+
+    Playwright's ``APIRequestContext.post()`` has no ``json`` keyword, so the JSON body has
+    to travel as ``data=json.dumps(...)`` with an explicit content type. Passing ``json=``
+    raised ``TypeError`` inside the retry loop, which swallowed all ten POST attempts before
+    they ever left the process.
+    """
+    attempts: list[tuple[str, str, dict[str, Any]]] = []
+    for url in WEB_EXCHANGE_ENDPOINTS:
+        # JSON POST with the CSRF header is the shape the portal actually wants (409
+        # csrf_token_invalid proved the route exists and only the header was missing).
+        for payload in ({"code": code}, {"exchangeCode": code}):
+            headers = {"Content-Type": "application/json"}
+            if xsrf:
+                headers["x-xsrf-token"] = xsrf
+                headers["x-csrf-token"] = xsrf
+            attempts.append(("post", url, {"data": json.dumps(payload), "headers": headers}))
+        attempts.append(("get", url, {"params": {"code": code}}))
+        attempts.append(("post", url, {"form": {"code": code}}))
+    return attempts
+
+
 async def _redeem_exchange_code(context: Any, code: str) -> bool:
     """Spend the exchange code at whichever endpoint still exists.
 
@@ -468,20 +516,7 @@ async def _redeem_exchange_code(context: Any, code: str) -> bool:
     except Exception:
         xsrf = ""
 
-    attempts: list[tuple[str, str, dict[str, Any]]] = []
-    for url in WEB_EXCHANGE_ENDPOINTS:
-        # JSON POST with the CSRF header is the shape the portal actually wants (409
-        # csrf_token_invalid proved the route exists and only the header was missing).
-        for payload in ({"code": code}, {"exchangeCode": code}):
-            headers = {"Content-Type": "application/json"}
-            if xsrf:
-                headers["x-xsrf-token"] = xsrf
-                headers["x-csrf-token"] = xsrf
-            attempts.append(("post", url, {"json": payload, "headers": headers}))
-        attempts.append(("get", url, {"params": {"code": code}}))
-        attempts.append(("post", url, {"form": {"code": code}}))
-
-    for method, url, kwargs in attempts:
+    for method, url, kwargs in _build_exchange_attempts(code, xsrf):
         try:
             if method == "get":
                 response = await context.request.get(
@@ -512,6 +547,91 @@ async def _redeem_exchange_code(context: Any, code: str) -> bool:
     return False
 
 
+def _bearer_cookies(access_token: str, expires_at: int) -> list[dict[str, Any]]:
+    """Build the ``EPIC_BEARER_TOKEN`` cookies the store front-end trades for a web session.
+
+    Mirrors ``setupCookies`` in claabs/epicgames-freegames-node (src/puppet/base.ts): the
+    cookie is planted on every Epic domain the store may redirect through, and the store
+    itself mints ``EPIC_EG1`` from it on the first cart navigation.
+    """
+    return [
+        {
+            "name": BEARER_COOKIE_NAME,
+            "value": access_token,
+            "domain": domain,
+            "path": "/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "Lax",
+            "expires": float(expires_at),
+        }
+        for domain in BEARER_COOKIE_DOMAINS
+    ]
+
+
+async def seed_bearer_session(context: Any, page: Any = None) -> bool:
+    """Seed the browser session from the stored access token, without touching the login page.
+
+    Returns True as soon as the store has minted ``EPIC_EG1`` (the cookie the store's own
+    GraphQL calls need). Best-effort: any failure returns False so the caller can fall back
+    to the code-exchange paths.
+    """
+    if not enabled():
+        return False
+
+    token = await access_token()
+    if not token:
+        logger.info("Session vault: no access token; bearer seeding skipped")
+        return False
+
+    state = read_state()
+    expires_at = int(state.get("expires_at") or 0) or int(time.time() + 7200)
+    try:
+        await context.add_cookies(_bearer_cookies(token, expires_at))
+    except Exception as err:
+        logger.warning("Session vault: bearer cookie injection failed | error={!r}", err)
+        return False
+
+    if page is None:
+        try:
+            page = await context.new_page()
+        except Exception as err:
+            logger.warning(
+                "Session vault: could not open a page for bearer seeding | error={!r}", err
+            )
+            return False
+
+    try:
+        await page.goto(STORE_CART_URL, wait_until="domcontentloaded", timeout=45000)
+    except Exception as err:
+        # A Cloudflare interstitial or a slow shell is not fatal: the cookie exchange still
+        # happens, so keep polling for EPIC_EG1 below.
+        logger.info("Session vault: cart navigation failed | error={!r}", err)
+
+    deadline = time.monotonic() + EG1_POLL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            cookies = await context.cookies()
+        except Exception:
+            cookies = []
+        for cookie in cookies:
+            if cookie.get("name") == EG1_COOKIE_NAME and "epicgames.com" in (
+                cookie.get("domain") or ""
+            ):
+                logger.success(
+                    "Session vault: EPIC_EG1 minted from bearer cookie | domain={}",
+                    cookie.get("domain"),
+                )
+                return True
+        await asyncio.sleep(EG1_POLL_INTERVAL_SECONDS)
+
+    logger.warning(
+        "Session vault: EPIC_EG1 not minted within {}s; falling back to code exchange",
+        EG1_POLL_TIMEOUT_SECONDS,
+    )
+    return False
+
+
 async def try_seed(context: Any) -> bool:
     """Turn the stored token into browser cookies so the login page never renders.
 
@@ -521,9 +641,16 @@ async def try_seed(context: Any) -> bool:
     if not enabled():
         return False
 
+    page = context.pages[0] if getattr(context, "pages", None) else None
+
+    # Preferred path (claabs): hand the store the access token as a bearer cookie and let it
+    # mint EPIC_EG1 itself. Independent of the retired exchange route and immune to the
+    # Cloudflare challenge that guards the login page.
+    if await seed_bearer_session(context, page):
+        return True
+
     # The exchange endpoint requires the portal CSRF cookie, so open a portal page first and
     # only then mint the (short-lived) exchange code.
-    page = context.pages[0] if getattr(context, "pages", None) else None
     if page is not None:
         try:
             await page.goto(
@@ -604,9 +731,7 @@ async def _seed(context: Any, token: str) -> bool:
             return True
 
         exchange = await context.request.get(
-            WEB_EXCHANGE_URL,
-            params={"code": code},
-            timeout=HTTP_TIMEOUT_SECONDS * 1000,
+            WEB_EXCHANGE_URL, params={"code": code}, timeout=HTTP_TIMEOUT_SECONDS * 1000
         )
         if exchange.status < 400:
             logger.success("Session vault: session seeded from token | status={}", exchange.status)
