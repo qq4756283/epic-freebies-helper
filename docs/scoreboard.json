@@ -1307,5 +1307,29 @@
       "source": "refresh",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-30T14:37:41Z",
+    "run_id": "41072844412",
+    "event": "workflow_dispatch",
+    "outcome": "unknown",
+    "stage": "",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "ok",
+        "ms": 47155.3
+      },
+      {
+        "stage": "claim",
+        "result": "failed",
+        "ms": 21269.9
+      }
+    ],
+    "session": {
+      "source": "refresh",
+      "has_refresh_token": true
+    }
   }
 ]
