@@ -2202,3 +2202,37 @@ vogler 的注释——`After <6h it resets to no captcha; getting a new IP also 
     `Monument Valley`（均到 2026-11-02 16:00Z）、`Sorry We're Closed`（到 2026-11-05 16:00Z）。
   - 因此"10-29 23:00 必须领完"的判断是错的：本周窗口到 11-02 才结束，还有 3 天余量。
 - 结果：闸门按 12h 生效；下次尝试窗口为北京时间 20:30 那个槽位。
+
+### 2026-10-30 15:30 会话播种链路修复：修掉吞掉全部兑换请求的 kwargs bug，并新增 bearer cookie 播种
+
+- 症状：2026-10-23 起的运行日志里，会话金库每次都能成功刷新 `refresh_token`（
+  `source=refresh | expires_in=129600s`）、也每次都能拿到 exchange code，但紧接着的兑换
+  环节 10 条 POST 全部失败，随后被迫回退密码登录 → 登录页 hCaptcha → `auth_failed_captcha`
+  （scoreboard 45/59 即此类）。
+- 根因判断（两条，均可从日志直接证明）：
+  1. `_redeem_exchange_code` 把 `{"json": payload}` 传给 Playwright 的
+     `APIRequestContext.post()`，而该 API **没有** `json` 关键字参数，运行时抛
+     `TypeError: APIRequestContext.post() got an unexpected keyword argument 'json'`，
+     被 except 吞掉——10 条请求**根本没离开进程**，所以线上看到的是"静默失败"而不是 Epic 的
+     任何状态码。
+  2. `_redeem_via_page` 的页面内 fetch 只带 `Content-Type`，缺 `x-xsrf-token`，被
+     `409 errors.com.epicgames.accountportal.csrf_token_invalid` 拒绝。
+  另：旧 `id/api/exchange` 路由 2026 年已 404/409，即使修好上面两条也不能只靠它，故新增
+  与 claabs/epicgames-freegames-node 相同的 bearer cookie 播种路径（不依赖任何已死端点）。
+- 改动文件：
+  - `app/services/session_vault.py`
+    - 新增 `_build_exchange_attempts()` 纯函数：JSON body 改为 `data=json.dumps(...)`，
+      带 XSRF header 时同时补 `x-xsrf-token`/`x-csrf-token`；`_redeem_exchange_code` 改用它。
+    - `_redeem_via_page`：页面内 fetch 先从 `document.cookie` 读 `XSRF-TOKEN`，再带
+      `x-xsrf-token`/`x-csrf-token` 发出。
+    - 新增 `_bearer_cookies()` 与 `seed_bearer_session()`：把 access token 作为
+      `EPIC_BEARER_TOKEN` cookie 注入 `.epicgames.com`/`.twinmotion.com`/`.fortnite.com`/
+      `.unrealengine.com`，打开 `store.epicgames.com/en-US/cart`，轮询 `context.cookies()`
+      等前端自铸 `EPIC_EG1`（700ms 间隔，60s 上限，可用 `EPIC_EG1_POLL_TIMEOUT_SECONDS` 调整）。
+    - `try_seed()`：把 bearer 播种放在**首选**位置，失败才走原有 portal warm-up +
+      exchange code 路径（原有行为不变，符合本模块"best-effort、永不使运行变差"的约定）。
+  - `tests/test_session_vault_seeding.py`（新增，6 个用例）：钉住"不得再出现 json 关键字"、
+    XSRF header 仅在拿到 cookie 时出现、attempts 覆盖全部端点与形状、bearer cookie 覆盖 4 个域、
+    无 token / cookie 注入失败时返回 False。
+- 结果：`pytest` 61 → 67 全绿；`ruff check` 通过；`black -l 100` 通过。登录阶段是否需要
+  hCaptcha 由下一次真实运行验证（预期：EPIC_EG1 铸造成功 → 不再渲染登录页）。
