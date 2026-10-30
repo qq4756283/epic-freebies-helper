@@ -67,6 +67,24 @@ def _format_game_link(game: PromotionGame) -> str:
     return f'<a href="{escape(_format_telegram_game_url(url), quote=True)}">{title}</a>'
 
 
+def prefill_checkout_url(game: PromotionGame) -> str:
+    """One-click checkout link for a free promotion (claabs/epicgames-freegames-node style).
+
+    Epic's checkout accepts ``offers=1-{namespace}-{offerId}``. Opening this on a device that is
+    already signed in turns a blocked automation run into a two-click manual claim, which is the
+    cheapest possible fallback when the run cannot finish on its own.
+    """
+    namespace = (game.namespace or "").strip()
+    offer_id = (game.id or "").strip()
+    if not namespace or not offer_id:
+        return ""
+    return (
+        "https://www.epicgames.com/store/purchase?highlightColor=0078f2"
+        f"&offers=1-{namespace}-{offer_id}"
+        "&orderId&purchaseToken&showNavigation=true"
+    )
+
+
 def _format_games(games: list[PromotionGame]) -> str:
     if not games:
         return "无"
@@ -74,6 +92,9 @@ def _format_games(games: list[PromotionGame]) -> str:
     lines = []
     for game in games:
         lines.append(f"- {_format_game_link(game)}")
+        checkout_url = prefill_checkout_url(game)
+        if checkout_url:
+            lines.append(f"  一键领取: {checkout_url}")
     return "\n".join(lines)
 
 

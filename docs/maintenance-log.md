@@ -2292,3 +2292,31 @@ vogler 的注释——`After <6h it resets to no captcha; getting a new IP also 
   `Cloudflare interstitial ... waiting for clearance` 且随后 `storefront rendered`，说明浏览器
   能自行过盾；若始终过不去，则证明**免费方案的天花板就是出口 IP**，需走 PLAN.md 的 P2
   （家用常开设备 + 系统 cron）或 `BROWSER_PROXY`。
+
+### 2026-10-30 22:37 第三次真实验证：Cloudflare 45 秒未放行，免费路径触顶；失败通知改为带一键领取链接
+
+- 症状（run 41072844412，force=1，2m58s）：
+  - `22:36:31 EPIC_EG1 minted` → `22:36:32 Cloudflare interstitial on the store |
+    url=https://store.epicgames.com/en-US/cart | waiting for clearance` → `22:37:16 storefront
+    did not render within 45.0s | challenge_seen=True`。
+  - 播种后 cookie 清单里已出现 `EPIC_AUTH_007c0bfe…`、`EPIC_AUTH_875a3b57…`（两个 store client
+    的会话 cookie），说明**会话本身建成了**，是 Cloudflare 按 IP/ASN 拦店面页。
+- 根因判断：本仓库出口是 GitHub Actions 数据中心 IP，`store.epicgames.com` 对其弹托管挑战；
+  bearer 播种省掉了登录页，也就省掉了过去在登录页上"真人式交互"换来的放行。这与外部调研的
+  结论完全一致（QIN2DIM #281：Hetzner VPS 上 `curl -I store.epicgames.com` 直接
+  `403 cf-mitigated: challenge`；2026-09-30 起店面前端普遍出现 CF 挑战）。**这不是代码能修的
+  维度**：同一 IP 段上，10-29 那轮能渲染店面、今天三轮连续被挑战，说明风险分是累积的——
+  也再次印证"密集重试是负收益"。
+- 改动文件：
+  - `app/services/telegram_notification_service.py`：新增 `prefill_checkout_url(game)`（按
+    `offers=1-{namespace}-{offerId}` 生成 claabs 式预填结算链接），`_format_games()` 为每个游戏
+    追加"一键领取: <url>"一行。失败通知的"本周游戏"段落本就来自 `get_promotions()` 公共接口
+    （不需要登录态），因此**任何失败通知现在都自带 1-click 领取链接**：在已登录设备上点两下即可
+    完成本周领取，单次人工从"重跑一遍/手动找页面"降到约 30 秒。
+  - `tests/test_telegram_prefill_links.py`（新增 2 用例）：链接含正确的 namespace/offerId 对；
+    缺任一标识时返回空串（不产生坏链接）。
+- 结果：`pytest` 73 全绿。免费路线现状总结：
+  1. 登录验证码：**已消除**（token→bearer cookie→EPIC_EG1，两次实跑 `stage=auth | result=ok`，
+     零 hCaptcha）；
+  2. 新瓶颈：Cloudflare 对数据中心 IP 的店面挑战（代码层无解，需换出口）；
+  3. 兜底：失败即推 1-click 领取链接，人工 30 秒完成。
