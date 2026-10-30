@@ -587,6 +587,67 @@ async def store_session_present(context: Any) -> bool:
     )
 
 
+CF_CHALLENGE_MARKERS = (
+    "just a moment",
+    "cf_challenge",
+    "checking your browser",
+    "attention required",
+    "verify you are human",
+)
+
+
+async def await_store_page_ready(page: Any, timeout_seconds: float = 45.0) -> bool:
+    """Wait until the storefront itself renders, Cloudflare interstitial included.
+
+    A bearer-seeded session skips the login page - and with it the browser interaction that
+    used to earn Cloudflare's clearance. Run 41071858313 showed the consequence: EPIC_EG1 was
+    minted, then every account/store request answered 403 with a ``cf_challenge_text_small``
+    page and the claim page never rendered ``egs-navigation``. Giving the real Firefox time to
+    clear the challenge puts ``cf_clearance`` in the context, which is what later page loads
+    and API calls need. Best-effort: returns False instead of raising.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    challenge_seen = False
+    while time.monotonic() < deadline:
+        try:
+            state = await page.evaluate(
+                """() => {
+                    const title = (document.title || "").toLowerCase();
+                    const body = (document.body ? document.body.innerText : "")
+                        .slice(0, 400)
+                        .toLowerCase();
+                    return {
+                        title,
+                        body,
+                        hasNav: !!document.querySelector("egs-navigation"),
+                        url: location.href,
+                    };
+                }"""
+            )
+        except Exception:
+            state = {}
+
+        if (state or {}).get("hasNav"):
+            logger.success("Session vault: storefront rendered | url={}", state.get("url"))
+            return True
+
+        haystack = f"{state.get('title', '')} {state.get('body', '')}"
+        if any(marker in haystack for marker in CF_CHALLENGE_MARKERS) and not challenge_seen:
+            challenge_seen = True
+            logger.warning(
+                "Session vault: Cloudflare interstitial on the store | url={} | waiting for clearance",
+                state.get("url"),
+            )
+        await asyncio.sleep(1.0)
+
+    logger.warning(
+        "Session vault: storefront did not render within {}s | challenge_seen={}",
+        timeout_seconds,
+        challenge_seen,
+    )
+    return False
+
+
 async def seed_bearer_session(context: Any, page: Any = None) -> bool:
     """Seed the browser session from the stored access token, without touching the login page.
 
@@ -630,6 +691,12 @@ async def seed_bearer_session(context: Any, page: Any = None) -> bool:
     while time.monotonic() < deadline:
         if await store_session_present(context):
             logger.success("Session vault: EPIC_EG1 minted from bearer cookie")
+            # The storefront still has to clear Cloudflare before the claim flow can use the
+            # session; doing it here means cf_clearance lands in the context exactly once.
+            await await_store_page_ready(page)
+            with suppress(Exception):
+                names = sorted({cookie.get("name") for cookie in await context.cookies()})
+                logger.info("Session vault: cookies after seeding | {}", names)
             return True
         await asyncio.sleep(EG1_POLL_INTERVAL_SECONDS)
 

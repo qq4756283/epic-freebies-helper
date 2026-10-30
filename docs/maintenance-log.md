@@ -2264,3 +2264,31 @@ vogler 的注释——`After <6h it resets to no captcha; getting a new IP also 
     均返回 False）。
 - 结果：`pytest` 69 全绿、`ruff`/`black` 通过；等待下一次真实运行验证"登录阶段零验证码"是否
   成立，以及店面会话能否把流程推到 checkout。
+
+### 2026-10-30 22:31 第二次真实验证：登录阶段零验证码达成；墙移到 Cloudflare
+
+- 症状（run 41071858313，force=1，2m35s，outcome=`unknown`）：
+  - `22:30:35 SUCCESS epic_authorization_service:invoke:1066 - Store session established from
+    the seeded token; skipping the login page` → `Stage event | stage=auth | result=ok`。
+    **登录阶段首次完全无 hCaptcha、无登录页**（对比：前一轮 6 次挑战、4 次失败）。
+  - 但紧接着领取阶段卡住：`_get_login_status` 连续 5 次 `Timed out while waiting for
+    //egs-navigation on claim page`（每轮 1.5s，共约 8s），`_has_account_session()` 探针
+    `Order history request returned status=403 | body=<html>... .cf_challenge_text_small ...`
+    ——**Cloudflare 挑战页**，最终 `RuntimeError` 判领取失败。
+- 根因判断：bearer 播种跳过登录页的同时，也跳过了过去那个"真人式"浏览器交互所换来的
+  Cloudflare 放行（`cf_clearance`）。于是店面页与 `www.epicgames.com/account/...` 接口在
+  数据中心 IP 上直接吃到 CF 挑战（403 + `cf_challenge_text_small`），页面渲染不出
+  `egs-navigation`。这与外部调研一致（2026-09-30 起店面前端出现 CF 挑战；claabs issue
+  亦报 cart 403 + `cf-mitigated`）：**IP 信誉这一维没有变，只是以前被登录流程掩盖了**。
+- 改动文件：
+  - `app/services/session_vault.py`：新增 `await_store_page_ready(page, timeout=45)`——轮询
+    页面 DOM，检测 CF 挑战特征（`just a moment` / `cf_challenge` / `checking your browser`
+    / `attention required` / `verify you are human`）并等待放行，直到 `egs-navigation`
+    出现或超时；`seed_bearer_session` 在 EG1 铸成后调用它（让 `cf_clearance` 落进 context，
+    后续页面与接口共用），并新增一行"播种后 cookie 名称清单"日志（便于确认是否拿到
+    `cf_clearance`）。
+  - `tests/test_session_vault_seeding.py`：新增 2 个用例（店面渲染成功 / 挑战页超时返回 False）。
+- 结果：`pytest` 71 全绿、`ruff` 通过。下一步观察点：下一次运行若日志出现
+  `Cloudflare interstitial ... waiting for clearance` 且随后 `storefront rendered`，说明浏览器
+  能自行过盾；若始终过不去，则证明**免费方案的天花板就是出口 IP**，需走 PLAN.md 的 P2
+  （家用常开设备 + 系统 cron）或 `BROWSER_PROXY`。

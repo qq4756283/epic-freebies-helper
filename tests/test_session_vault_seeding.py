@@ -111,3 +111,24 @@ def test_store_session_present_rejects_foreign_domains_and_broken_contexts():
 
     assert asyncio.run(vault.store_session_present(_ForeignDomain())) is False
     assert asyncio.run(vault.store_session_present(_Broken())) is False
+
+
+def test_await_store_page_ready_detects_rendered_storefront():
+    class _Page:
+        async def evaluate(self, _script):
+            return {"title": "epic games store", "body": "", "hasNav": True, "url": "/en-US"}
+
+    assert asyncio.run(vault.await_store_page_ready(_Page(), timeout_seconds=5)) is True
+
+
+def test_await_store_page_ready_gives_up_on_a_challenge_page():
+    class _Page:
+        async def evaluate(self, _script):
+            return {
+                "title": "just a moment...",
+                "body": "checking your browser",
+                "hasNav": False,
+                "url": "/en-US",
+            }
+
+    assert asyncio.run(vault.await_store_page_ready(_Page(), timeout_seconds=2)) is False
