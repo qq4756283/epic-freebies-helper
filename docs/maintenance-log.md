@@ -2189,3 +2189,16 @@ vogler 的注释——`After <6h it resets to no captcha; getting a new IP also 
    解法：接一个更强的视觉模型（付费 GLM-4.6V / Gemini 免费额度）专用于这两类题型。
 2. **冷却从 6h 提到 24h**，并在同一天内最多 2 次尝试，避免自我加压。
 3. 若仍不稳，则需要住宅/家宽出口（`BROWSER_PROXY`）。
+
+### 2026-10-30 09:00 冷却提到 12 小时；确认本周实际免费游戏与截止时间
+
+- 症状：昨夜 05:16 一次尝试仍是 `auth_failed_captcha`，08:01 那次被闸门跳过（符合预期）。
+- 根因判断：10-29 一天内试了 7 次，挑战数从 3 涨到 14、解出率从 2/3 掉到 1/14，说明密集重试
+  会推高 Epic 的怀疑度（与上游 vogler 注释 `After <6h it resets to no captcha` 一致）。
+- 改动文件：
+  - `scripts/gate.py`：`ATTEMPT_COOLDOWN_HOURS` 默认 6 → 12，即每天最多 2 次登录尝试。
+- 顺带确认（本地直连 `store-site-backend-static.ak.epicgames.com` 返回 200）：
+  - 当前在领的免费游戏共 4 个：`Eternal Threads`、`Castlevania Anniversary Collection`、
+    `Monument Valley`（均到 2026-11-02 16:00Z）、`Sorry We're Closed`（到 2026-11-05 16:00Z）。
+  - 因此"10-29 23:00 必须领完"的判断是错的：本周窗口到 11-02 才结束，还有 3 天余量。
+- 结果：闸门按 12h 生效；下次尝试窗口为北京时间 20:30 那个槽位。

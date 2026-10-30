@@ -27,7 +27,7 @@ RUNTIME_OUTCOME = ROOT.joinpath("app", "volumes", "runtime", "run-outcome.json")
 OUTPUT_NAME = "run"
 TZ = timezone(timedelta(hours=8))  # Asia/Shanghai
 CLAIM_WINDOW_DAYS = int(os.getenv("CLAIM_WINDOW_DAYS", "5"))
-ATTEMPT_COOLDOWN_HOURS = float(os.getenv("ATTEMPT_COOLDOWN_HOURS", "6"))
+ATTEMPT_COOLDOWN_HOURS = float(os.getenv("ATTEMPT_COOLDOWN_HOURS", "12"))
 VERIFIED_OUTCOMES = {"claimed_ok"}
 ATTEMPT_OUTCOMES = {
     "auth_failed_captcha",
