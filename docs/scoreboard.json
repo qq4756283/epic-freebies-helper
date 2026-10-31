@@ -1403,5 +1403,29 @@
       "source": "refresh",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-10-31T06:06:35Z",
+    "run_id": "41175094338",
+    "event": "schedule",
+    "outcome": "unknown",
+    "stage": "",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "ok",
+        "ms": 9059.7
+      },
+      {
+        "stage": "claim",
+        "result": "failed",
+        "ms": 22404.6
+      }
+    ],
+    "session": {
+      "source": "refresh",
+      "has_refresh_token": true
+    }
   }
 ]
