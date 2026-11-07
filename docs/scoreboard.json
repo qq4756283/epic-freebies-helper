@@ -2147,5 +2147,29 @@
       "source": "refresh",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-11-07T23:46:27Z",
+    "run_id": "42426610459",
+    "event": "schedule",
+    "outcome": "unknown",
+    "stage": "",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "ok",
+        "ms": 5750.3
+      },
+      {
+        "stage": "claim",
+        "result": "failed",
+        "ms": 22358.2
+      }
+    ],
+    "session": {
+      "source": "refresh",
+      "has_refresh_token": true
+    }
   }
 ]
