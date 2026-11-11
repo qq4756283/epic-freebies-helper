@@ -2496,5 +2496,29 @@
       "source": "browser_login",
       "has_refresh_token": true
     }
+  },
+  {
+    "at": "2026-11-11T22:56:02Z",
+    "run_id": "43115394692",
+    "event": "schedule",
+    "outcome": "unknown",
+    "stage": "",
+    "detail": "",
+    "stages": [
+      {
+        "stage": "auth",
+        "result": "ok",
+        "ms": 46716.2
+      },
+      {
+        "stage": "claim",
+        "result": "failed",
+        "ms": 18640.8
+      }
+    ],
+    "session": {
+      "source": "refresh",
+      "has_refresh_token": true
+    }
   }
 ]
